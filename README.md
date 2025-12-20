@@ -18,7 +18,7 @@ This project is a Python-based Applesoft BASIC interpreter and renderer built to
 - **Complete Applesoft BASIC implementation** - All major commands and functions
 - **Graphics modes**:
   - `GR` - Low-resolution graphics (40x48)
-  - `HGR`/`HGR2` - High-resolution graphics (280x192)
+  - `HGR`/`HGR2` - High-resolution graphics (280x192) with proper pixel erasing
   - `TEXT` - 40-column text mode
 - **Full language support**:
   - Variables (numeric and string)
@@ -66,7 +66,8 @@ Then type BASIC commands directly:
 
 ```bash
 python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS] [--no-keep-open] \
-                    [--autosnap-every N] [--autosnap-on-end] [--no-artifact] [--composite-blur]
+                    [--autosnap-every N] [--autosnap-on-end] [--no-artifact] [--composite-blur] \
+                    [--delay SECONDS]
 ```
 
 - `--input-timeout`: Set input timeout in seconds (default: 30)
@@ -74,8 +75,9 @@ python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS
 - `--no-keep-open`: Close the pygame window when program ends
 - `--autosnap-every N`: Save a screenshot every N statements (helpful for tests)
 - `--autosnap-on-end`: Save a screenshot when the program ends
-- `--no-artifact`: Disable Apple II NTSC artifact simulation (use direct RGB colors)
+- `--no-artifact`: Use artifact-free rendering (disables NTSC artifact simulation for HGR mode)
 - `--composite-blur`: Apply a horizontal blur effect to approximate composite smoothing
+- `--delay`: Statement execution delay in seconds to simulate Apple II speed (default: 0.001)
 
 ## Example Programs
 
@@ -241,7 +243,7 @@ When a timeout occurs, the program will display an error message and halt execut
 
 ## Testing Your Code
 
-The interpreter makes it easy to test BASIC programs:
+Test programs are included in the `basic_code/` folder for reference and experimentation. The interpreter makes it easy to test BASIC programs:
 
 1. **Create a simple test program**:
    ```basic
@@ -251,7 +253,7 @@ The interpreter makes it easy to test BASIC programs:
 
 2. **Run it**:
    ```bash
-   python applesoft.py test.bas
+   python applesoft.py basic_code/test.bas
    ```
 
 3. **Use Ctrl+C to break** if the program runs indefinitely

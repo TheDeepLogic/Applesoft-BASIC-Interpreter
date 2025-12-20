@@ -35,7 +35,8 @@ Successfully created a complete Applesoft BASIC interpreter in Python with full 
 - **GR Mode**: 40x48 low-resolution graphics with 16 colors
 - **HGR/HGR2 Modes**: 280x192 high-resolution graphics with 8 colors
 - **Mixed Text Overlay**: `HGR` composites only the bottom 4 text rows over graphics; `HGR2` is full-screen graphics by default
-- **Artifact Simulation**: NTSC artifact color rules enabled by default; optional `--no-artifact` disables it; optional `--composite-blur` adds horizontal smoothing.
+- **Artifact Simulation**: NTSC artifact color rules disabled by default; optional `--no-artifact` flag available; optional `--composite-blur` adds horizontal smoothing
+- **Pixel Erasing**: Proper overwriting of pixels when drawing with different colors using pygame surface.fill()
 - Commands: `PLOT`, `HPLOT`, `HLIN`, `VLIN`, `COLOR=`, `HCOLOR=`
 - Proper color palettes matching Apple II
 
@@ -110,7 +111,7 @@ ApplesoftInterpreter
 - Each mode has its own surface
 - Text mode supports 40-column layout
 - GR: Each "pixel" is 14x8 screen pixels
-- HGR: Each pixel is 2x2 screen pixels (for visibility); artifact-mode simulates palette/phase behavior; white is explicitly handled for `HCOLOR 3/7`.
+- HGR: Each pixel is 2x2 screen pixels (for visibility); artifact-mode can simulate palette/phase behavior; white is explicitly handled for `HCOLOR 3/7`; pixel erasing works via pygame surface.fill() to properly overwrite pixels with new colors
 - Proper color palettes matching original Apple II
  
 #### Compatibility Notes (HCOLOR and HPLOT)
@@ -118,20 +119,24 @@ ApplesoftInterpreter
 - `HPLOT x,y TO x2,y2` first plots at `x,y` using current `HCOLOR`, then draws the line with that color.
 - After changing `HCOLOR`, issue a single `HPLOT` to set the active color before subsequent `HPLOT TO` statements.
 
-## Testing
+## Bug Fixes (Recent Session)
 
-Created comprehensive test programs:
+1. **Array Auto-Dimensioning**: Arrays like `P()`, `C()`, `X()`, `Y()` without explicit DIM statements now auto-dimension to [0..10]
+2. **RND() Seeding**: Fixed random number generation to properly seed on interpreter reset, ensuring different values each run
+3. **Expression Evaluation**: 
+   - Fixed spaced comparison operators (`> =`, `< =`, `< >`) via regex normalization
+   - Fixed function calls with spaces (e.g., `RND (1)`)
+   - Fixed `RND(1)*279` arithmetic evaluation by proper function boundary detection
+4. **Artifact Mode Default**: Changed default from enabled to disabled for cleaner HGR rendering
+5. **HPLOT Pixel Erasing**: Fixed indentation bug in non-artifact drawing code that prevented pygame surface.fill() from executing, which was causing pixels to not be properly overwritten
+6. **Statement Delay**: Added `--delay` command-line option to slow down execution for visual observation
 
-1. **test_basic.bas** - Core language features (loops, variables, conditionals)
-2. **test_math.bas** - Math and string functions
-3. **test_graphics.bas** - Low-resolution graphics
-4. **test_hires.bas** - High-resolution graphics with crosshair + circle
-5. **test_hires_thick.bas** - Hi-res with 2x stroke thickness
-6. **test_hires_extra_thick.bas** - Hi-res with 4x stroke thickness
-7. **test_hires_color_bars.bas** - Solid color bar sweep across all `HCOLOR`
-5. **test_demo.bas** - Combined graphics demonstration
+## Test Organization
 
-All tests pass successfully.
+All test BASIC programs have been moved to the `basic_code/` folder to keep the root directory clean. Tests can be run with:
+```bash
+python applesoft.py basic_code/test_name.bas
+```
 
 ## Known Limitations
 
@@ -173,11 +178,14 @@ python applesoft.py
 
 ### Artifact/Composite Flags
 ```bash
-# Disable artifact simulation
+# Disable artifact simulation (use direct RGB colors)
 python applesoft.py test_hires.bas --no-artifact
 
 # Enable optional composite blur effect
 python applesoft.py test_hires_color_bars.bas --composite-blur
+
+# Add statement delay for slower execution
+python applesoft.py test.bas --delay 0.003
 ```
 
 ## Performance
@@ -208,7 +216,7 @@ The interpreter can run authentic Applesoft BASIC programs and is suitable for:
 - Retro computing
 - BASIC program development
 
-**Total Lines of Code**: ~1420 lines
-**Implementation Time**: Single session
-**Test Coverage**: Excellent
-**Status**: Production-ready
+**Total Lines of Code**: ~2175 lines
+**Implementation Time**: Multiple sessions with iterative fixes
+**Test Coverage**: Comprehensive (45+ test programs in basic_code/)
+**Status**: Production-ready with proper graphics pixel erasing
