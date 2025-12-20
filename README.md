@@ -2,6 +2,8 @@
 
 A comprehensive Python implementation of the Applesoft BASIC interpreter with full graphics support using pygame.
 
+This project is a Python-based Applesoft BASIC interpreter and renderer built to run and visualize Apple II BASIC programs on modern systems with faithful high‑resolution graphics. It was created to streamline AI‑assisted generation and debugging of Applesoft code without constantly round‑tripping through external emulators, while documenting and reproducing subtle hardware behaviors like NTSC color artifacting, mixed HGR/text overlays, and authentic `HPLOT`/`HCOLOR` semantics. With pragmatic CLI controls (timeouts, autosnap, optional artifact simulation and composite blur), it provides a fast, repeatable way to validate program output, compare rendering against emulators, and explore graphics logic. It’s useful for learning Applesoft, prototyping and testing graphics routines, and capturing reproducible screenshots for documentation and regression tests—without setting up a full vintage environment.
+
 > **AI-Assisted Development Notice**
 > 
 > Hello, fellow human! My name is Aaron Smith. I've been in the IT field for nearly three decades and have extensive experience as both an engineer and architect. While I've had various projects in the past that have made their way into the public domain, I've always wanted to release more than I could. I write useful utilities all the time that aid me with my vintage computing and hobbyist electronic projects, but rarely publish them. I've had experience in both the public and private sectors and can unfortunately slip into treating each one of these as a fully polished cannonball ready for market. It leads to scope creep and never-ending updates to documentation.
