@@ -77,8 +77,8 @@ class ApplesoftInterpreter:
     ]
     
     def __init__(self, input_timeout: float = 30.0, execution_timeout: float = None, keep_window_open: bool = True,
-                 autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = True,
-                 composite_blur: bool = False):
+                 autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
+                 composite_blur: bool = False, statement_delay: float = 0.001):
         """Initialize the interpreter
         
         Args:
@@ -89,6 +89,7 @@ class ApplesoftInterpreter:
             autosnap_on_end: Save a screenshot when program ends (default: False)
             artifact_mode: Simulate Apple II NTSC artifact color rules (default: True)
             composite_blur: Apply composite horizontal blur effect (default: False)
+            statement_delay: Delay in seconds after each statement to simulate Apple II speed (default: 0.001)
         """
         self.input_timeout = input_timeout
         self.execution_timeout = execution_timeout
@@ -97,6 +98,7 @@ class ApplesoftInterpreter:
         self.autosnap_on_end = autosnap_on_end
         self.artifact_mode = artifact_mode
         self.composite_blur = composite_blur
+        self.statement_delay = statement_delay
         self.reset()
         
     def reset(self):
@@ -107,6 +109,9 @@ class ApplesoftInterpreter:
         # Variables
         self.variables: Dict[str, Union[float, str]] = {}
         self.arrays: Dict[str, List] = {}
+        
+        # Seed random number generator with current time for different results each run
+        random.seed()
         
         # Execution state
         self.pc = 0  # Program counter (line number)
@@ -295,8 +300,6 @@ class ApplesoftInterpreter:
                         if event.type == pygame.QUIT:
                             self.running = False
                             return
-                    # Small sleep to prevent CPU spinning and allow display updates
-                    time.sleep(0.001)
                 
                 # Find current line
                 if self.pc not in self.program:
@@ -320,6 +323,9 @@ class ApplesoftInterpreter:
                         self.execute_statement(statement)
                         # Update display after each statement to show graphics in real-time
                         self.update_display()
+                        # Add delay to simulate Apple II speed
+                        if self.statement_delay > 0:
+                            time.sleep(self.statement_delay)
                         # Auto-screenshot every N statements if enabled
                         self.statement_counter += 1
                         if self.autosnap_every and (self.statement_counter % int(self.autosnap_every) == 0):
@@ -678,8 +684,13 @@ class ApplesoftInterpreter:
             value = self.evaluate(expr_part)
             
             # Set array element
+            # Auto-create array with default dimension if not already dimensioned
+            # In Applesoft BASIC, arrays default to 0-10 (11 elements) if not explicitly dimensioned
             if var_name not in self.arrays:
-                raise ApplesoftError(f"Array not dimensioned: {var_name}")
+                if len(indices) == 1:
+                    self.arrays[var_name] = [0] * 11
+                elif len(indices) == 2:
+                    self.arrays[var_name] = [[0] * 11 for _ in range(11)]
                 
             arr = self.arrays[var_name]
             if len(indices) == 1:
@@ -1365,6 +1376,28 @@ class ApplesoftInterpreter:
         color = int(self.evaluate(args))
         self.hgr_color = color % 8
         
+    def _draw_line_bresenham(self, x1: int, y1: int, x2: int, y2: int, color: tuple):
+        """Draw a line using Bresenham algorithm directly on pygame surface"""
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        sx = 1 if x1 < x2 else -1
+        sy = 1 if y1 < y2 else -1
+        err = dx - dy
+        
+        x, y = x1, y1
+        while True:
+            rect = pygame.Rect(x * 2, y * 2, 2, 2)
+            self.hgr_surface.fill(color, rect)
+            if x == x2 and y == y2:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+    
     def cmd_hplot(self, args: str):
         """HPLOT command - plot in hi-res graphics"""
         # Can be: HPLOT x,y or HPLOT x,y TO x2,y2
@@ -1411,9 +1444,23 @@ class ApplesoftInterpreter:
                 if artifact_active:
                     self._plot_artifact_pixel(x1, y1, self.hgr_color)
                     self._draw_line_artifact(x1, y1, x2, y2, self.hgr_color)
-                elif self.graphics_mode in ['HGR', 'HGR2'] and PYGAME_AVAILABLE and self.hgr_surface:
-                    color = self.HGR_COLORS[self.hgr_color]
-                    pygame.draw.line(self.hgr_surface, color, (x1 * 2, y1 * 2), (x2 * 2, y2 * 2), 2)
+                else:
+                    if self.graphics_mode in ['HGR', 'HGR2'] and PYGAME_AVAILABLE and self.hgr_surface:
+                        color = self.HGR_COLORS[self.hgr_color]
+                        # Draw line by filling each pixel individually
+                        if x1 == x2:
+                            # Vertical line
+                            for y in range(min(y1, y2), max(y1, y2) + 1):
+                                rect = pygame.Rect(x1 * 2, y * 2, 2, 2)
+                                self.hgr_surface.fill(color, rect)
+                        elif y1 == y2:
+                            # Horizontal line
+                            for x in range(min(x1, x2), max(x1, x2) + 1):
+                                rect = pygame.Rect(x * 2, y1 * 2, 2, 2)
+                                self.hgr_surface.fill(color, rect)
+                        else:
+                            # Diagonal - use Bresenham
+                            self._draw_line_bresenham(x1, y1, x2, y2, color)
                 self.hgr_x = x2
                 self.hgr_y = y2
             else:
@@ -1654,15 +1701,30 @@ class ApplesoftInterpreter:
             # Check if name_part is a valid identifier (not an expression like "140 + 100 * COS")
             # Must be letters, digits, underscore, $ (and optionally "FN " prefix)
             if re.match(r'^(FN\s+)?[A-Za-z_]\w*\$?$', name_part.strip()):
-                # Check if it's a function call
-                name_upper = name_part.upper()
+                # Check if it's a function call - strip spaces from name_part to handle "RND (1)"
+                name_upper = name_part.strip().upper()
                 # Normalize FN names to ignore spaces after FN
                 if name_upper.startswith('FN '):
                     name_upper = 'FN' + name_upper[3:]
                 if name_upper in ['INT', 'ABS', 'SGN', 'SQR', 'SIN', 'COS', 'TAN', 
                                  'ATN', 'LOG', 'EXP', 'RND',
                                  'PEEK', 'PDL', 'SCRN', 'POS', 'FRE']:
-                    return self.evaluate_function(expr)
+                    # Find the matching closing paren for this function
+                    depth = 0
+                    closing_paren_pos = -1
+                    for i in range(paren_pos, len(expr)):
+                        if expr[i] == '(':
+                            depth += 1
+                        elif expr[i] == ')':
+                            depth -= 1
+                            if depth == 0:
+                                closing_paren_pos = i
+                                break
+                    
+                    # Only treat as function call if the closing paren is at the end
+                    # Otherwise it's something like RND(1)*279 which needs to be parsed as multiplication
+                    if closing_paren_pos > 0 and closing_paren_pos == len(expr) - 1:
+                        return self.evaluate_function(expr)
                 elif name_upper in ['LEN', 'VAL', 'ASC']:
                     # These can work with strings
                     return self.evaluate_string_or_numeric_function(expr)
@@ -1671,25 +1733,50 @@ class ApplesoftInterpreter:
                 elif '$' in name_upper and name_upper.replace('$', '') in ['STR', 'CHR', 'LEFT', 'RIGHT', 'MID']:
                     return self.evaluate_string_function(expr)
                 else:
-                    # Array access
-                    var_name = name_part.upper()
-                    indices_str = expr[paren_pos + 1:expr.rindex(')')]
-                    indices = [int(self.evaluate(idx.strip())) for idx in indices_str.split(',')]
+                    # Array access - find the matching closing paren
+                    depth = 0
+                    closing_paren_pos = -1
+                    for i in range(paren_pos, len(expr)):
+                        if expr[i] == '(':
+                            depth += 1
+                        elif expr[i] == ')':
+                            depth -= 1
+                            if depth == 0:
+                                closing_paren_pos = i
+                                break
                     
-                    if var_name not in self.arrays:
-                        raise ApplesoftError(f"Array not dimensioned: {var_name}")
+                    # Only treat as array access if the closing paren is at the end (possibly with whitespace)
+                    if closing_paren_pos > 0 and closing_paren_pos == len(expr) - 1:
+                        var_name = name_part.upper()
+                        indices_str = expr[paren_pos + 1:closing_paren_pos]
+                        indices = [int(self.evaluate(idx.strip())) for idx in indices_str.split(',')]
                         
-                    arr = self.arrays[var_name]
-                    if len(indices) == 1:
-                        return arr[indices[0]]
-                    elif len(indices) == 2:
-                        return arr[indices[0]][indices[1]]
+                        # Auto-create array with default dimension if not already dimensioned
+                        # In Applesoft BASIC, arrays default to 0-10 (11 elements) if not explicitly dimensioned
+                        if var_name not in self.arrays:
+                            if len(indices) == 1:
+                                self.arrays[var_name] = [0] * 11
+                            elif len(indices) == 2:
+                                self.arrays[var_name] = [[0] * 11 for _ in range(11)]
+                            
+                        arr = self.arrays[var_name]
+                        if len(indices) == 1:
+                            return arr[indices[0]]
+                        elif len(indices) == 2:
+                            return arr[indices[0]][indices[1]]
                     
         # Try to evaluate as arithmetic expression
         return self.evaluate_arithmetic(expr)
         
     def evaluate_arithmetic(self, expr: str) -> float:
         """Evaluate an arithmetic expression"""
+        # Normalize comparison operators by removing ALL spaces (e.g., ">  =" or "> =" becomes ">=")
+        # Use regex to replace operators with any amount of whitespace
+        import re
+        expr = re.sub(r'<\s*>', '<>', expr)
+        expr = re.sub(r'>\s*=', '>=', expr)
+        expr = re.sub(r'<\s*=', '<=', expr)
+        
         # Handle operators in order of precedence
         
         # First, handle OR
@@ -1753,12 +1840,16 @@ class ApplesoftInterpreter:
                 left = expr[:i].strip()
                 right = expr[i+1:].strip()
                 if left:  # Not a unary plus
-                    return self.evaluate_arithmetic(left) + self.evaluate_arithmetic(right)
+                    left_val = self.evaluate(left)
+                    right_val = self.evaluate(right)
+                    return float(left_val) + float(right_val)
             elif depth == 0 and char == '-':
                 left = expr[:i].strip()
                 right = expr[i+1:].strip()
                 if left:  # Not a unary minus
-                    return self.evaluate_arithmetic(left) - self.evaluate_arithmetic(right)
+                    left_val = self.evaluate(left)
+                    right_val = self.evaluate(right)
+                    return float(left_val) - float(right_val)
                     
         # Handle multiplication and division
         depth = 0
@@ -1771,14 +1862,18 @@ class ApplesoftInterpreter:
             elif depth == 0 and char == '*':
                 left = expr[:i].strip()
                 right = expr[i+1:].strip()
-                return self.evaluate_arithmetic(left) * self.evaluate_arithmetic(right)
+                left_val = self.evaluate(left)
+                right_val = self.evaluate(right)
+                return float(left_val) * float(right_val)
             elif depth == 0 and char == '/':
                 left = expr[:i].strip()
                 right = expr[i+1:].strip()
-                divisor = self.evaluate_arithmetic(right)
+                left_val = self.evaluate(left)
+                right_val = self.evaluate(right)
+                divisor = float(right_val)
                 if divisor == 0:
                     raise ApplesoftError("Division by zero")
-                return self.evaluate_arithmetic(left) / divisor
+                return float(left_val) / divisor
                 
         # Handle exponentiation
         if '^' in expr:
@@ -1792,16 +1887,19 @@ class ApplesoftInterpreter:
                 elif depth == 0 and char == '^':
                     left = expr[:i].strip()
                     right = expr[i+1:].strip()
-                    return self.evaluate_arithmetic(left) ** self.evaluate_arithmetic(right)
+                    left_val = self.evaluate(left)
+                    right_val = self.evaluate(right)
+                    return float(left_val) ** float(right_val)
                     
         # Handle NOT
         if expr.upper().startswith('NOT '):
-            val = self.evaluate_arithmetic(expr[4:])
+            val = self.evaluate(expr[4:])
             return float(not val)
             
         # Handle unary minus
         if expr.startswith('-'):
-            return -self.evaluate_arithmetic(expr[1:])
+            val = self.evaluate(expr[1:])
+            return -float(val)
             
         # Handle parentheses
         if expr.startswith('(') and expr.endswith(')'):
@@ -1816,10 +1914,6 @@ class ApplesoftInterpreter:
         # Base case - must be variable, function, or array
         var_name = expr.upper()
         
-        # Check for function call
-        if '(' in expr:
-            return float(self.evaluate(expr))
-            
         # Variable lookup
         if var_name in self.variables:
             val = self.variables[var_name]
@@ -1833,7 +1927,7 @@ class ApplesoftInterpreter:
     def evaluate_function(self, expr: str) -> float:
         """Evaluate a built-in function"""
         paren_pos = expr.index('(')
-        func_name = expr[:paren_pos].upper()
+        func_name = expr[:paren_pos].strip().upper()
         args_str = expr[paren_pos + 1:expr.rindex(')')]
         
         if func_name == 'INT':
@@ -2024,10 +2118,12 @@ def main():
                        help='Automatically save a screenshot when program ends')
     parser.add_argument('--no-artifact', dest='artifact_mode', action='store_false',
                        help='Disable NTSC artifact color simulation (use direct RGB colors)')
-    parser.set_defaults(artifact_mode=True)
+    parser.set_defaults(artifact_mode=False)
     parser.add_argument('--composite-blur', dest='composite_blur', action='store_true',
                        help='Apply horizontal composite blur effect (ghostly afterglow)')
     parser.set_defaults(composite_blur=False)
+    parser.add_argument('--delay', type=float, default=0.001,
+                       help='Statement execution delay in seconds to simulate Apple II speed (default: 0.001)')
     
     args = parser.parse_args()
     
@@ -2038,7 +2134,8 @@ def main():
         autosnap_every=args.autosnap_every,
         autosnap_on_end=args.autosnap_on_end,
         artifact_mode=args.artifact_mode,
-        composite_blur=args.composite_blur
+        composite_blur=args.composite_blur,
+        statement_delay=args.delay
     )
     
     if args.filename:

@@ -1,0 +1,9 @@
+10 P(0) = 181
+20 FOR I = 0 TO 5
+30 PRINT "P(0)=";P(0)
+40 PRINT "1=";1
+50 PRINT "I=";I
+60 PRINT "P(0)+1=";P(0)+1
+70 PRINT "P(0)+1+I=";P(0)+1+I
+80 NEXT I
+90 END

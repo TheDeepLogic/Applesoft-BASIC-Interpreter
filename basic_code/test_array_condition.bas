@@ -1,0 +1,7 @@
+10 Y(0)=15
+20 PRINT "Y(0)=";Y(0)
+30 PRINT "Y(0)-1=";Y(0)-1
+40 IF Y(0)-1 >= 14 THEN PRINT "YES: Y(0)-1 >= 14"
+50 IF Y(0)-1 >= 15 THEN PRINT "YES: Y(0)-1 >= 15"
+60 IF Y(0)-1 >  = 14 THEN PRINT "YES (SPACED): Y(0)-1 >  = 14"
+70 IF Y(0)-1 >  = 15 THEN PRINT "YES (SPACED): Y(0)-1 >  = 15"
