@@ -1,0 +1,2 @@
+10 LET I = 5
+20 PRINT I

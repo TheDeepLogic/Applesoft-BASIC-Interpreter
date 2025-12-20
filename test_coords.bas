@@ -1,0 +1,11 @@
+1 REM ** TEST COORDINATES **
+5 HGR
+10 HCOLOR = 3
+20 REM ** Plot at different Y values **
+30 HPLOT 10,10
+40 HPLOT 10,50
+50 HPLOT 10,100
+60 HPLOT 10,150
+70 REM ** Pause to view **
+80 FOR I = 1 TO 10000000: NEXT I
+90 END

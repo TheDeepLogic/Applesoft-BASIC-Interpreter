@@ -1,0 +1,27 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual environments
+.env/
+.venv/
+venv/
+
+# VS Code / IDE
+.vscode/
+*.code-workspace
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Project-specific: exclude generated/reference assets
+bin/
+original_source/
+screenshots/
+
+# Keep BASIC test programs in repo (default: include all .bas)
+# No ignore rules for .bas files
