@@ -85,7 +85,7 @@ class ApplesoftInterpreter:
     
     def __init__(self, input_timeout: float = 30.0, execution_timeout: float = None, keep_window_open: bool = True,
                  autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
-                 composite_blur: bool = False, statement_delay: float = 0.0, auto_close: bool = False):
+                 composite_blur: bool = False, statement_delay: float = 0.0, auto_close: bool = False, scale: int = 2):
         """Initialize the interpreter
         
         Args:
@@ -97,6 +97,7 @@ class ApplesoftInterpreter:
             artifact_mode: Simulate Apple II NTSC artifact color rules (default: True)
             composite_blur: Apply composite horizontal blur effect (default: False)
             statement_delay: Delay in seconds after each statement to simulate Apple II speed (default: 0.0001)
+            scale: Display scale factor for pygame window (default: 2)
         """
         self.input_timeout = input_timeout
         self.execution_timeout = execution_timeout
@@ -107,6 +108,7 @@ class ApplesoftInterpreter:
         self.composite_blur = composite_blur
         self.statement_delay = statement_delay
         self.auto_close = auto_close
+        self.scale = max(1, scale)  # Minimum scale of 1
         # Sound state
         self._last_speaker_click = 0.0
         self._speaker_click_min_interval = 0.03  # seconds between clicks to avoid blocking
@@ -216,9 +218,9 @@ class ApplesoftInterpreter:
             return
         if not pygame.get_init():
             pygame.init()
-        # Use HGR-sized window so text area maps consistently
-        self.screen = pygame.display.set_mode((560, 384))
-        pygame.display.set_caption("Applesoft BASIC")
+        # Use HGR-sized window scaled by scale factor
+        self.screen = pygame.display.set_mode((560 * self.scale, 384 * self.scale))
+        pygame.display.set_caption(f"Applesoft BASIC (Scale: {self.scale}x)")
         # Load a font or fall back
         try:
             import os as _os
@@ -457,6 +459,11 @@ class ApplesoftInterpreter:
                 continue
             self.current_part_index = idx
             self.execute_single_statement(part, immediate)
+            # If PC was changed by a control flow command (GOTO, GOSUB, NEXT looping back, etc.),
+            # stop executing further statements on this line
+            if self.pc_changed:
+                break
+        
             
     def is_in_string(self, text: str, pos: int) -> bool:
         """Check if position is inside a string literal"""
@@ -881,22 +888,22 @@ class ApplesoftInterpreter:
                 
     def cmd_for(self, args: str):
         """FOR command"""
-        # OPTIMIZATION: Check if we're already in this loop (jumped back via NEXT)
-        # If so, skip re-initialization and jump to next line
-        if self.for_stack and self.for_stack[-1]['line'] == self.pc:
-            # Already in this loop - just continue (jump to next line)
-            next_line = self.get_next_line(self.pc)
-            if next_line:
-                self.pc = next_line
-                self.pc_changed = True
-            return
-        
         # Parse: FOR var = start TO end [STEP step]
         match = re.match(r'(\w+)\s*=\s*(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+))?$', args, re.IGNORECASE)
         if not match:
             raise ApplesoftError("Syntax error in FOR")
             
         var = match.group(1).upper()
+        
+        # OPTIMIZATION: Check if we're already in this loop (jumped back via NEXT)
+        # If so, skip re-initialization and continue
+        # This handles the case where NEXT loops back to FOR
+        # Must check both line number AND variable name to handle nested loops on same line
+        if self.for_stack and self.for_stack[-1]['line'] == self.pc and self.for_stack[-1]['var'] == var:
+            # Already in this loop - just continue (don't re-initialize)
+            # Don't change PC - let normal statement processing continue on this line
+            return
+        
         start = self.evaluate(match.group(2))
         end = self.evaluate(match.group(3))
         step = self.evaluate(match.group(4)) if match.group(4) else 1
@@ -910,7 +917,7 @@ class ApplesoftInterpreter:
             'end': end,
             'step': step,
             'line': self.pc,
-            'resume_part': getattr(self, 'current_part_index', 0) + 1
+            'resume_part': getattr(self, 'current_part_index', 0)  # Resume at FOR, not after it
         }
         self.for_stack.append(loop_info)
         
@@ -931,7 +938,8 @@ class ApplesoftInterpreter:
         for_line = loop['line']
         next_line = self.get_next_line(for_line)
         
-        if next_line == self.pc:
+        # Only optimize if FOR and NEXT are on different consecutive lines (not same line with multiple statements)
+        if next_line == self.pc and for_line != self.pc:
             # This is a tight loop - FOR on one line, NEXT on the very next line with nothing in between
             # Execute remaining iterations in tight Python loop with real Apple II timing
             loop_var = loop['var']
@@ -1244,10 +1252,11 @@ class ApplesoftInterpreter:
             if not pygame.display.get_init():
                 self.init_graphics()
             # Ensure screen is the right size for HGR
-            if not self.screen or self.screen.get_size() != (560, 384):
+            expected_size = (560 * self.scale, 384 * self.scale)
+            if not self.screen or self.screen.get_size() != expected_size:
                 pygame.init()
-                self.screen = pygame.display.set_mode((560, 384))
-                pygame.display.set_caption("Applesoft BASIC")
+                self.screen = pygame.display.set_mode(expected_size)
+                pygame.display.set_caption(f"Applesoft BASIC (Scale: {self.scale}x)")
                 # Need to reload font after pygame.init()
                 import os
                 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1290,10 +1299,11 @@ class ApplesoftInterpreter:
             if not pygame.display.get_init():
                 self.init_graphics()
             # Ensure screen is the right size for HGR
-            if not self.screen or self.screen.get_size() != (560, 384):
+            expected_size = (560 * self.scale, 384 * self.scale)
+            if not self.screen or self.screen.get_size() != expected_size:
                 pygame.init()
-                self.screen = pygame.display.set_mode((560, 384))
-                pygame.display.set_caption("Applesoft BASIC")
+                self.screen = pygame.display.set_mode(expected_size)
+                pygame.display.set_caption(f"Applesoft BASIC (Scale: {self.scale}x)")
             # Create/clear HGR page 2 surface and select it
             if not self.hgr_page2_surface:
                 self.hgr_page2_surface = pygame.Surface((560, 384))
@@ -2821,9 +2831,17 @@ class ApplesoftInterpreter:
             return
             
         if self.graphics_mode == 'TEXT':
-            self.screen.blit(self.text_surface, (0, 0))
+            if self.scale > 1:
+                scaled = pygame.transform.scale(self.text_surface, (560 * self.scale, 384 * self.scale))
+                self.screen.blit(scaled, (0, 0))
+            else:
+                self.screen.blit(self.text_surface, (0, 0))
         elif self.graphics_mode == 'GR' and self.gr_surface:
-            self.screen.blit(self.gr_surface, (0, 0))
+            if self.scale > 1:
+                scaled = pygame.transform.scale(self.gr_surface, (560 * self.scale, 384 * self.scale))
+                self.screen.blit(scaled, (0, 0))
+            else:
+                self.screen.blit(self.gr_surface, (0, 0))
         elif self.graphics_mode in ['HGR', 'HGR2'] and self.hgr_surface:
             # Optionally apply a simple horizontal composite blur to reduce zebra artifacts
             if self.composite_blur:
@@ -2842,12 +2860,20 @@ class ApplesoftInterpreter:
                     # If surfarray fails, fall back to unblurred blit
                     pass
             # Blit graphics first
-            self.screen.blit(self.hgr_surface, (0, 0))
+            if self.scale > 1:
+                scaled_hgr = pygame.transform.scale(self.hgr_surface, (560 * self.scale, 384 * self.scale))
+                self.screen.blit(scaled_hgr, (0, 0))
+            else:
+                self.screen.blit(self.hgr_surface, (0, 0))
             # Then composite text over bottom 4 lines (mixed mode)
             if self.text_surface and self.hgr_mixed:
                 # Only blit the bottom 4 text rows (rows 20-23, pixels 320-383)
                 text_rect = pygame.Rect(0, 320, 560, 64)  # 4 rows * 16 pixels
-                self.screen.blit(self.text_surface, (0, 320), text_rect)
+                if self.scale > 1:
+                    scaled_text = pygame.transform.scale(self.text_surface, (560 * self.scale, 384 * self.scale))
+                    self.screen.blit(scaled_text, (0, 320 * self.scale), pygame.Rect(0, 320 * self.scale, 560 * self.scale, 64 * self.scale))
+                else:
+                    self.screen.blit(self.text_surface, (0, 320), text_rect)
             
         pygame.display.flip()
 
@@ -2904,6 +2930,8 @@ def main():
                        help='Statement execution delay in seconds to simulate Apple II speed (default: 0.0 = no delay for tight loops)')
     parser.add_argument('--auto-close', action='store_true',
                        help='Automatically close pygame window and exit when program ends (useful for testing)')
+    parser.add_argument('--scale', type=int, default=2,
+                       help='Display scale factor (default: 2 for 1120x768 window)')
     
     args = parser.parse_args()
     
@@ -2916,7 +2944,8 @@ def main():
         artifact_mode=args.artifact_mode,
         composite_blur=args.composite_blur,
         statement_delay=args.delay,
-        auto_close=args.auto_close
+        auto_close=args.auto_close,
+        scale=args.scale
     )
     
     if args.filename:

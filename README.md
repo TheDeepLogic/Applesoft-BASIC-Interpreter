@@ -38,6 +38,7 @@ This project is a Python-based Applesoft BASIC interpreter and renderer built to
   - `GR` - Low-resolution graphics (40x48)
   - `HGR`/`HGR2` - High-resolution graphics (280x192) with proper pixel erasing
   - `TEXT` - 40-column text mode
+  - **Configurable display scaling** - Default 2x scale (1120x768 window) for modern displays
 - **Full language support**:
   - Variables (numeric and string)
   - Arrays with `DIM`
@@ -92,7 +93,7 @@ Then type BASIC commands directly:
 ```bash
 python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS] \
                     [--auto-close] [--autosnap-every N] [--autosnap-on-end] \
-                    [--no-artifact] [--composite-blur] [--delay SECONDS]
+                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--scale N]
 ```
 
 **Options:**
@@ -104,6 +105,7 @@ python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS
 - `--no-artifact`: Use artifact-free rendering (disables NTSC simulation)
 - `--composite-blur`: Apply horizontal blur for composite smoothing
 - `--delay`: Statement execution delay in seconds (default: 0.001)
+- `--scale`: Display scale factor (default: 2 for 1120x768 window)
 
 ### Example Programs:
 
@@ -116,6 +118,9 @@ python applesoft.py basic_code/graphics_hires/test_snow.bas --input-timeout 60 -
 
 # Run with performance timing
 python applesoft.py basic_code/control_flow/test_for_performance.bas --auto-close
+
+# Run with custom scale factor (e.g., 2x for smaller window)
+python applesoft.py basic_code/graphics_hires/test_hires.bas --scale 2
 ```
 
 ---
