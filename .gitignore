@@ -4,7 +4,8 @@ __pycache__/
 *.pyo
 *.pyd
 *.log
-*.stderr
+stderr.txt
+stdout.txt
 
 # Virtual environments
 .env/
