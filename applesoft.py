@@ -937,11 +937,25 @@ class ApplesoftInterpreter:
         # detect this and execute all remaining iterations in a tight Python loop
         for_line = loop['line']
         next_line = self.get_next_line(for_line)
+        resume_part = loop.get('resume_part', 0)
         
-        # Only optimize if FOR and NEXT are on different consecutive lines (not same line with multiple statements)
-        if next_line == self.pc and for_line != self.pc:
-            # This is a tight loop - FOR on one line, NEXT on the very next line with nothing in between
-            # Execute remaining iterations in tight Python loop with real Apple II timing
+        # Check if this is a tight loop:
+        # 1. FOR and NEXT on same line with nothing in between (resume_part points to NEXT)
+        # 2. FOR and NEXT on consecutive lines with nothing in between
+        is_tight_loop = False
+        if for_line == self.pc:
+            # Same line - check if resume_part points directly to the NEXT (no statements in between)
+            # Count statements to see if NEXT immediately follows FOR
+            if hasattr(self, 'current_part_index'):
+                # If current part is NEXT and resume_part is current part, it's tight
+                if resume_part == self.current_part_index:
+                    is_tight_loop = True
+        elif next_line == self.pc and for_line != self.pc:
+            # Different consecutive lines - NEXT is on line right after FOR
+            is_tight_loop = True
+        
+        if is_tight_loop:
+            # This is a tight loop - execute remaining iterations with Apple II timing
             loop_var = loop['var']
             end_val = loop['end']
             step_val = loop['step']
@@ -1008,15 +1022,20 @@ class ApplesoftInterpreter:
         # Get variable names
         var_names = [v.strip().upper() for v in vars_str.split(',')]
         
-        # Get input with timeout
+        # Display prompt and get input
         if prompt:
-            print(prompt, end='')
-        print('? ', end='', flush=True)
+            self.render_text_to_surface(prompt)
+        self.render_text_to_surface('? ')
+        self.update_display()
         
         input_str = self.get_input_with_timeout()
         
         if input_str is None:
             raise ApplesoftError(f"Input timeout after {self.input_timeout} seconds")
+        
+        # Echo the input to the display
+        self.render_text_to_surface(input_str + '\n')
+        self.update_display()
             
         # Parse input values
         values = [v.strip() for v in input_str.split(',')]
@@ -1053,30 +1072,101 @@ class ApplesoftInterpreter:
             self.variables[var] = ord(char)
             
     def get_input_with_timeout(self) -> Optional[str]:
-        """Get input with timeout"""
-        self.input_result = None
-        self.waiting_for_input = True
+        """Get input with timeout from pygame keyboard events"""
+        if not PYGAME_AVAILABLE or not self.screen:
+            # Fallback to console input if pygame not available or no screen
+            print('? ', end='', flush=True)
+            self.input_result = None
+            def input_thread():
+                try:
+                    self.input_result = input()
+                except:
+                    pass
+            thread = threading.Thread(target=input_thread, daemon=True)
+            thread.start()
+            thread.join(timeout=self.input_timeout)
+            return self.input_result
         
-        def input_thread():
-            try:
-                self.input_result = input()
-            except:
-                pass
-                
-        thread = threading.Thread(target=input_thread, daemon=True)
-        thread.start()
-        thread.join(timeout=self.input_timeout)
+        # Get input from pygame keyboard events
+        input_buffer = []
+        start_time = time.time()
         
-        self.waiting_for_input = False
-        return self.input_result
+        while True:
+            # Check timeout
+            if time.time() - start_time > self.input_timeout:
+                return None
+            
+            # Handle pygame events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    return None
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                        # Enter pressed - return the input
+                        return ''.join(input_buffer)
+                    elif event.key == pygame.K_BACKSPACE:
+                        # Backspace - remove last character
+                        if input_buffer:
+                            input_buffer.pop()
+                            # Move cursor back and erase character
+                            if self.text_x > 0:
+                                self.text_x -= 1
+                            # Redraw with erased character
+                            if self.text_surface:
+                                x_pixel = self.text_x * 14
+                                y_pixel = self.text_y * 16
+                                pygame.draw.rect(self.text_surface, (0, 0, 0), 
+                                               pygame.Rect(x_pixel, y_pixel, 14, 16))
+                            self.update_display()
+                    elif event.key == pygame.K_ESCAPE:
+                        # Escape - cancel input
+                        return None
+                    elif event.unicode and event.unicode.isprintable():
+                        # Regular character
+                        char = event.unicode
+                        input_buffer.append(char)
+                        # Echo character to display
+                        self.render_char_to_surface(char)
+                        self.update_display()
+            
+            # Small delay to reduce CPU usage
+            pygame.time.wait(10)
         
     def get_char_with_timeout(self) -> Optional[str]:
-        """Get single character with timeout"""
-        # For simplicity, just get a line and return first char
-        result = self.get_input_with_timeout()
-        if result:
-            return result[0] if result else ''
-        return None
+        """Get single character with timeout from pygame keyboard events"""
+        if not PYGAME_AVAILABLE or not self.screen:
+            # Fallback to console input
+            result = self.get_input_with_timeout()
+            if result:
+                return result[0] if result else ''
+            return None
+        
+        # Get single character from pygame
+        start_time = time.time()
+        
+        while True:
+            # Check timeout
+            if time.time() - start_time > self.input_timeout:
+                return None
+            
+            # Handle pygame events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    return None
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        return None
+                    elif event.unicode and len(event.unicode) == 1:
+                        char = event.unicode
+                        # Echo character to display
+                        self.render_char_to_surface(char)
+                        self.update_display()
+                        return char
+            
+            # Small delay to reduce CPU usage
+            pygame.time.wait(10)
         
     def cmd_read(self, args: str):
         """READ command"""
