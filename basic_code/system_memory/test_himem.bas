@@ -1,0 +1,2 @@
+10 HIMEM: 40000
+20 PRINT "Done"

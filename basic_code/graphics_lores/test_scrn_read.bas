@@ -1,0 +1,30 @@
+REM SCRN FUNCTION DEMO
+REM Demonstrates reading screen memory and color values
+
+10 PRINT "SCRN FUNCTION DEMO"
+20 PRINT ""
+30 GR
+40 PRINT "Drawing test pattern..."
+50 
+REM Draw test pattern
+60 COLOR=1: PLOT 5,5
+70 COLOR=2: PLOT 10,5
+80 COLOR=3: PLOT 15,5
+90 COLOR=4: PLOT 5,10
+100 COLOR=5: PLOT 10,10
+110 COLOR=6: PLOT 15,10
+120 
+REM Read back values
+130 PRINT ""
+140 PRINT "Reading coordinates:"
+150 PRINT "SCRN(5,5)=" ; SCRN(5,5)
+160 PRINT "SCRN(10,5)=" ; SCRN(10,5)
+170 PRINT "SCRN(15,5)=" ; SCRN(15,5)
+180 PRINT "SCRN(5,10)=" ; SCRN(5,10)
+190 PRINT "SCRN(10,10)=" ; SCRN(10,10)
+200 PRINT "SCRN(15,10)=" ; SCRN(15,10)
+210 
+220 PRINT ""
+230 PRINT "Pattern complete. Press any key..."
+240 FOR I = 1 TO 20000000: NEXT I
+250 END

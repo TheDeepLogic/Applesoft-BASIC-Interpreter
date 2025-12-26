@@ -1,9 +1,0 @@
-10 HGR
-15 P(0) = 181
-20 HCOLOR= 1
-30 FOR I = 0 TO 9
-40 PRINT "I=";I;" Y=";P(0) + 1 + I
-50 HPLOT 0, P(0) + 1 + I TO 279, P(0) + 1 + I
-60 NEXT I
-70 PRINT "DONE"
-80 END

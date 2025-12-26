@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.log
+*.stderr
 
 # Virtual environments
 .env/
@@ -22,6 +23,7 @@ Thumbs.db
 bin/
 original_source/
 screenshots/
+ref/
 
 # Keep BASIC test programs in repo (default: include all .bas)
 # No ignore rules for .bas files

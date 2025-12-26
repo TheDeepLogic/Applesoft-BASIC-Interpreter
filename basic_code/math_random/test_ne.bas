@@ -1,0 +1,6 @@
+10 X = 42
+20 IF X <> 41 THEN PRINT "42 <> 41: YES"
+30 IF X <> 42 THEN PRINT "42 <> 42: YES"
+40 IF X <> 42 THEN END
+50 PRINT "42 <> 42 condition is false: OK"
+60 END

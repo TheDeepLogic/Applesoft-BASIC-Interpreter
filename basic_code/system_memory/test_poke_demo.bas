@@ -1,0 +1,41 @@
+10 REM Demonstration of common Apple II POKEs
+20 HOME
+30 PRINT "APPLE II POKE DEMONSTRATIONS"
+40 PRINT "=============================="
+50 PRINT ""
+
+100 REM Test 1: Memory peek at key addresses
+110 PRINT "MEMORY LOCATIONS:"
+120 PRINT "LOMEM = "; PEEK(103) + PEEK(104) * 256
+130 PRINT "HIMEM = "; PEEK(115) + PEEK(116) * 256
+140 PRINT ""
+
+200 REM Test 2: Text window control
+210 PRINT "TEXT WINDOW MARGINS (32-35):"
+220 X = PEEK(32)
+230 Y = PEEK(33)
+240 PRINT "Left margin = "; X
+250 PRINT "Window width = "; Y
+260 PRINT ""
+
+300 REM Test 3: Video mode control via POKE
+310 PRINT "GRAPHICS MODE TEST"
+320 HGR
+330 HCOLOR = 3
+340 HPLOT 0,0 TO 279,191
+350 PRINT "Drew line in HGR page 1"
+360 PRINT ""
+
+400 REM Test 4: Memory storage for general use
+410 PRINT "GENERAL MEMORY STORAGE:"
+420 FOR I = 0 TO 15
+430 POKE 800 + I, I * 16
+440 NEXT
+450 FOR I = 0 TO 15
+460 X = PEEK(800 + I)
+470 PRINT "MEM["; 800 + I; "] = "; X
+480 NEXT
+490 PRINT ""
+
+500 PRINT "DEMONSTRATION COMPLETE"
+510 END

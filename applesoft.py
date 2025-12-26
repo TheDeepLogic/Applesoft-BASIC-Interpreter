@@ -21,6 +21,13 @@ from datetime import datetime
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+# Windows sound support
+try:
+    import winsound
+    WINSOUND_AVAILABLE = True
+except Exception:
+    WINSOUND_AVAILABLE = False
+
 try:
     import pygame
     PYGAME_AVAILABLE = True
@@ -78,7 +85,7 @@ class ApplesoftInterpreter:
     
     def __init__(self, input_timeout: float = 30.0, execution_timeout: float = None, keep_window_open: bool = True,
                  autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
-                 composite_blur: bool = False, statement_delay: float = 0.001):
+                 composite_blur: bool = False, statement_delay: float = 0.0, auto_close: bool = False):
         """Initialize the interpreter
         
         Args:
@@ -89,7 +96,7 @@ class ApplesoftInterpreter:
             autosnap_on_end: Save a screenshot when program ends (default: False)
             artifact_mode: Simulate Apple II NTSC artifact color rules (default: True)
             composite_blur: Apply composite horizontal blur effect (default: False)
-            statement_delay: Delay in seconds after each statement to simulate Apple II speed (default: 0.001)
+            statement_delay: Delay in seconds after each statement to simulate Apple II speed (default: 0.0001)
         """
         self.input_timeout = input_timeout
         self.execution_timeout = execution_timeout
@@ -99,125 +106,139 @@ class ApplesoftInterpreter:
         self.artifact_mode = artifact_mode
         self.composite_blur = composite_blur
         self.statement_delay = statement_delay
+        self.auto_close = auto_close
+        # Sound state
+        self._last_speaker_click = 0.0
+        self._speaker_click_min_interval = 0.03  # seconds between clicks to avoid blocking
+        # Pygame mixer click fallback
+        self._mixer_ready = False
+        self._click_sound = None
         self.reset()
         
     def reset(self):
         """Reset the interpreter state"""
         # Program storage
         self.program: OrderedDict[int, str] = OrderedDict()
-        
+
         # Variables
         self.variables: Dict[str, Union[float, str]] = {}
         self.arrays: Dict[str, List] = {}
-        
+
+        # Memory array for POKE/PEEK (64KB Apple II address space)
+        self.memory = bytearray(65536)
+        self._init_memory_defaults()
+
+        # Graphics buffers
+        self.gr_buffer = [[0] * self.GR_WIDTH for _ in range(self.GR_HEIGHT)]
+
         # Seed random number generator with current time for different results each run
         random.seed()
-        
+
         # Execution state
         self.pc = 0  # Program counter (line number)
         self.running = False
         self.data_pointer = 0
         self.data_items: List[str] = []
-        
+        self.statement_counter = 0
+        self.pc_changed = False
+        self.pending_statement_index: Optional[int] = None
+        self.current_part_index: int = 0
+        self.error_handler_line = None
+        self.last_error = None
+
         # Control flow stacks
         self.for_stack: List[Dict[str, Any]] = []
         self.gosub_stack: List[int] = []
-        
-        # Graphics state
-        self.graphics_mode = 'TEXT'  # TEXT, GR, HGR, HGR2
-        self.hgr_color = 3  # White
-        self.gr_color = 15  # White
-        self.hgr_x = 0
-        self.hgr_y = 0
-        self.hgr_last_plot_color = 3  # Color of last explicit HPLOT (not HPLOT TO)
+
+        # Graphics/text state
+        self.graphics_mode = 'TEXT'
         self.text_x = 0
         self.text_y = 0
         self.inverse = False
         self.flash = False
-        # Hi-res page/mode state
-        self.hgr_page = 1  # 1 or 2
-        self.hgr_mixed = True  # mixed text overlay on bottom 4 lines
-        
-        # Pygame surfaces
+
+        # Surfaces and font
         self.screen = None
+        self.font = None
         self.text_surface = None
         self.gr_surface = None
         self.hgr_surface = None
         self.hgr_page1_surface = None
         self.hgr_page2_surface = None
-        # Hi-res backing memory (40 bytes * 192 lines per page)
+
+        # HGR settings and backing memory maps
+        self.hgr_mixed = False
+        self.hgr_page = 1
+        self.hgr_color = 3
         self.hgr_memory_page1 = None
         self.hgr_memory_page2 = None
-        # Per-pixel white override flags for white colors (HCOLOR 3/7)
         self.hgr_white_page1 = None
         self.hgr_white_page2 = None
-        # Per-pixel intended color index (for dense fills where artifact stripes would be unrealistic)
         self.hgr_color_page1 = None
         self.hgr_color_page2 = None
-        
-        # Input handling
-        self.input_result = None
-        self.input_thread = None
-        self.waiting_for_input = False
-        
-        # Error handling
-        self.error_handler_line = None
-        self.last_error = None
-        
-        # Functions
-        self.user_functions: Dict[str, Tuple[str, str]] = {}  # name -> (param, expression)
-        # Counters
-        self.statement_counter = 0
-        self.current_line = 0
-        
+
+        # Shape/trace/I-O state
+        self.shape_scale = 1
+        self.shape_rotation = 0
+        self.trace_enabled = False
+        self.last_executed_line = None
+        self.input_slot = None
+        self.output_slot = None
+
+        # Initialize pygame if needed in text mode
+        if PYGAME_AVAILABLE:
+            try:
+                self.init_graphics()
+            except Exception:
+                pass
+
+    def _init_memory_defaults(self):
+        """Initialize key memory locations to Apple II defaults."""
+        # LOMEM pointer at $0067-$0068 (103-104): default 2048
+        lomem = 2048
+        self.memory[103] = lomem & 0xFF
+        self.memory[104] = (lomem >> 8) & 0xFF
+        # HIMEM pointer at $0073-$0074 (115-116): default 32768
+        himem = 32768
+        self.memory[115] = himem & 0xFF
+        self.memory[116] = (himem >> 8) & 0xFF
+        # Cursor X/Y at 36-37
+        self.memory[36] = 0
+        self.memory[37] = 0
+        # Text attributes at 50 (255=NORMAL)
+        self.memory[50] = 255
+        # SPEED at 241 (optional, leave 0)
+        self.memory[241] = 0
+
     def init_graphics(self):
-        """Initialize pygame for graphics"""
+        """Initialize pygame window and text surface for the current mode."""
         if not PYGAME_AVAILABLE:
             return
-        
-        if pygame.display.get_init():
-            return
-            
-        pygame.init()
-        # Create a window that can handle both text and graphics
-        window_width = self.TEXT_COLS * 14  # 14 pixels per char width
-        window_height = self.TEXT_ROWS * 16  # 16 pixels per char height
-        self.screen = pygame.display.set_mode((window_width, window_height))
+        if not pygame.get_init():
+            pygame.init()
+        # Use HGR-sized window so text area maps consistently
+        self.screen = pygame.display.set_mode((560, 384))
         pygame.display.set_caption("Applesoft BASIC")
-        
-        # Load authentic Apple II font
-        # Try Print Char 21 first (uppercase), then PR Number 3 (mixed case)
-        import os
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        font_dir = os.path.join(script_dir, 'fonts')
-        
-        self.font = None
-        for font_file in ['PrintChar21.ttf', 'PRNumber3.ttf']:
-            font_path = os.path.join(font_dir, font_file)
-            if os.path.exists(font_path):
-                try:
-                    # Apple II characters are 7x8 pixels, scale up 2x for 14x16
-                    self.font = pygame.font.Font(font_path, 16)
-                    break
-                except:
-                    pass
-        
-        # Fallback to monospace if Apple II fonts not found
-        if not self.font:
-            for font_name in ['Courier New', 'Consolas', 'Courier', 'monospace']:
-                try:
-                    self.font = pygame.font.SysFont(font_name, 20, bold=True)
-                    if self.font:
+        # Load a font or fall back
+        try:
+            import os as _os
+            script_dir = _os.path.dirname(_os.path.abspath(__file__))
+            font_dir = _os.path.join(script_dir, 'fonts')
+            self.font = None
+            for font_file in ['PrintChar21.ttf', 'PRNumber3.ttf']:
+                font_path = _os.path.join(font_dir, font_file)
+                if _os.path.exists(font_path):
+                    try:
+                        self.font = pygame.font.Font(font_path, 16)
                         break
-                except:
-                    continue
-        
-        # Last resort fallback
-        if not self.font:
+                    except Exception:
+                        pass
+            if not self.font:
+                self.font = pygame.font.Font(None, 24)
+        except Exception:
             self.font = pygame.font.Font(None, 24)
-        
-        # Create surfaces for different modes
-        self.text_surface = pygame.Surface((window_width, window_height))
+        # Create text surface
+        self.text_surface = pygame.Surface((560, 384))
         self.text_surface.fill((0, 0, 0))
         
     def load_program(self, filename: str):
@@ -288,14 +309,17 @@ class ApplesoftInterpreter:
             self.pc = start_line
             
         try:
+            event_check_counter = 0
             while self.running:
                 # Check execution timeout
                 if self.execution_timeout and (time.time() - start_time) > self.execution_timeout:
                     print(f"\nExecution timeout after {self.execution_timeout} seconds")
                     break
                 
-                # Handle pygame events
-                if PYGAME_AVAILABLE and pygame.display.get_init():
+                # Handle pygame events periodically (every 100 iterations to avoid overhead)
+                event_check_counter += 1
+                if event_check_counter >= 100 and PYGAME_AVAILABLE and pygame.display.get_init():
+                    event_check_counter = 0
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             self.running = False
@@ -318,11 +342,16 @@ class ApplesoftInterpreter:
                     next_line = self.get_next_line(self.pc)
                     current_pc = self.pc
                     self.current_line = self.pc
+                    self.pc_changed = False
+                    start_index = self.pending_statement_index if self.pending_statement_index is not None else 0
+                    self.pending_statement_index = None
+                    
+                    # Output trace if enabled
+                    if self.trace_enabled:
+                        print(f" {self.pc} ", end='')
                     
                     try:
-                        self.execute_statement(statement)
-                        # Update display after each statement to show graphics in real-time
-                        self.update_display()
+                        self.execute_statement(statement, start_index=start_index)
                         # Add delay to simulate Apple II speed
                         if self.statement_delay > 0:
                             time.sleep(self.statement_delay)
@@ -340,15 +369,25 @@ class ApplesoftInterpreter:
                             continue
                         else:
                             # Apple-like message plus detail
-                            if self.current_line:
-                                print(f"SYNTAX ERROR IN {self.current_line}")
-                            else:
-                                print("SYNTAX ERROR")
-                            print(f"Detail: {e}")
+                            error_msg = f"SYNTAX ERROR IN {self.current_line}" if self.current_line else "SYNTAX ERROR"
+                            detail_msg = f"Detail: {e}"
+                            
+                            # Print to console
+                            print(error_msg)
+                            print(detail_msg)
+                            
+                            # Display error in pygame window like Apple II
+                            if PYGAME_AVAILABLE and pygame.display.get_init() and self.graphics_mode == 'TEXT':
+                                self.cmd_print(error_msg)
+                                self.cmd_print(detail_msg)
+                                self.update_display()
+                                # Wait briefly so user can see the error
+                                time.sleep(2)
+                            
                             break
                     
                     # Move to next line (unless changed by GOTO, NEXT, etc.)
-                    if self.pc == current_pc:
+                    if self.pc == current_pc and not self.pc_changed:
                         if next_line is None:
                             break
                         self.pc = next_line
@@ -360,14 +399,18 @@ class ApplesoftInterpreter:
         finally:
             self.running = False
             
+        # Print execution time
+        elapsed_time = time.time() - start_time
+        print(f"\n[Execution time: {elapsed_time:.2f} seconds]")
+            
         # Auto-screenshot at end if enabled
         if self.autosnap_on_end and PYGAME_AVAILABLE and pygame.display.get_init():
             try:
                 self.save_screenshot('final')
             except Exception:
                 pass
-        # Keep pygame window open until user closes it (if enabled)
-        if self.keep_window_open and PYGAME_AVAILABLE and pygame.display.get_init():
+        # Keep pygame window open until user closes it (if enabled and not auto_close)
+        if self.keep_window_open and not self.auto_close and PYGAME_AVAILABLE and pygame.display.get_init():
             print("\nProgram ended. Close the window to exit.")
             while True:
                 for event in pygame.event.get():
@@ -390,7 +433,7 @@ class ApplesoftInterpreter:
             pass
         return None
         
-    def execute_statement(self, statement: str, immediate: bool = False):
+    def execute_statement(self, statement: str, immediate: bool = False, start_index: int = 0):
         """Execute a single statement"""
         if not statement:
             return
@@ -405,10 +448,15 @@ class ApplesoftInterpreter:
         # Handle multiple statements on one line (separated by :)
         if ':' in statement and not self.is_in_string(statement, statement.index(':')):
             parts = self.split_on_colon(statement)
-            for part in parts:
-                self.execute_single_statement(part.strip(), immediate)
         else:
-            self.execute_single_statement(statement, immediate)
+            parts = [statement]
+        
+        for idx in range(start_index, len(parts)):
+            part = parts[idx].strip()
+            if not part:
+                continue
+            self.current_part_index = idx
+            self.execute_single_statement(part, immediate)
             
     def is_in_string(self, text: str, pos: int) -> bool:
         """Check if position is inside a string literal"""
@@ -419,20 +467,34 @@ class ApplesoftInterpreter:
         return in_string
         
     def split_on_colon(self, statement: str) -> List[str]:
-        """Split statement on colons, but not inside strings"""
+        """Split statement on colons, but not inside strings or as part of HIMEM:/LOMEM: syntax"""
         parts = []
         current = []
         in_string = False
+        i = 0
         
-        for char in statement:
+        while i < len(statement):
+            char = statement[i]
+            
             if char == '"':
                 in_string = not in_string
                 current.append(char)
+                i += 1
             elif char == ':' and not in_string:
-                parts.append(''.join(current))
-                current = []
+                # Check if this is part of HIMEM: or LOMEM: syntax
+                current_str = ''.join(current).upper().strip()
+                if current_str.endswith('HIMEM') or current_str.endswith('LOMEM'):
+                    # This colon is part of the command syntax, not a separator
+                    current.append(char)
+                    i += 1
+                else:
+                    # This is a statement separator
+                    parts.append(''.join(current))
+                    current = []
+                    i += 1
             else:
                 current.append(char)
+                i += 1
                 
         if current:
             parts.append(''.join(current))
@@ -451,6 +513,20 @@ class ApplesoftInterpreter:
             return
         if statement.upper().startswith('COLOR=') or statement.upper().startswith('COLOR ='):
             self.cmd_color(statement[5:].strip())  # Skip "COLOR"
+            return
+        
+        # Handle HIMEM: and LOMEM: assignments
+        if statement.upper().startswith('HIMEM:'):
+            addr = int(self.evaluate(statement[6:].strip()))
+            # Set HIMEM in memory
+            self.memory[115] = addr & 0xFF
+            self.memory[116] = (addr >> 8) & 0xFF
+            return
+        elif statement.upper().startswith('LOMEM:'):
+            addr = int(self.evaluate(statement[6:].strip()))
+            # Set LOMEM in memory
+            self.memory[103] = addr & 0xFF
+            self.memory[104] = (addr >> 8) & 0xFF
             return
             
         # Get command
@@ -552,6 +628,35 @@ class ApplesoftInterpreter:
             self.cmd_on(args)
         elif cmd == 'WAIT':
             self.cmd_wait(args)
+        elif cmd == 'TRACE':
+            self.trace_enabled = True
+        elif cmd == 'NOTRACE':
+            self.trace_enabled = False
+        elif cmd == 'CONT':
+            self.cmd_cont()
+        elif cmd == 'POP':
+            self.cmd_pop()
+        elif cmd == 'DRAW':
+            self.cmd_draw(args)
+        elif cmd == 'XDRAW':
+            self.cmd_xdraw(args)
+        elif cmd == 'SCALE':
+            self.cmd_scale(args)
+        elif cmd == 'ROT':
+            self.cmd_rot(args)
+        elif cmd == 'IN#':
+            self.cmd_in(args)
+        elif cmd == 'PR#':
+            self.cmd_pr(args)
+        elif cmd == 'USR':
+            # USR returns a value, usually used in assignments or print
+            result = self.evaluate(f'USR({args})')
+        elif cmd == 'SOUND':
+            self.cmd_sound(args)
+        elif cmd == 'LOAD':
+            self.cmd_load(args)
+        elif cmd == 'SAVE':
+            self.cmd_save(args)
         elif '=' in statement and not any(op in statement for op in ['<', '>', '==']):
             # Assignment without LET (must be checked after all commands with =)
             self.cmd_let(statement)
@@ -621,6 +726,7 @@ class ApplesoftInterpreter:
                 self.render_text_to_surface(text)
             else:
                 self.render_text_to_surface(text + '\n')
+            self.update_display()
             
     def parse_print_items(self, args: str) -> List[str]:
         """Parse PRINT statement items"""
@@ -715,22 +821,34 @@ class ApplesoftInterpreter:
         line_num = int(self.evaluate(args))
         if line_num not in self.program:
             raise ApplesoftError(f"Undefined statement: {line_num}")
-        next_line = self.get_next_line(self.pc)
-        if next_line:
-            self.gosub_stack.append(next_line)
-        else:
-            self.gosub_stack.append(-1)  # Mark end
+        
+        # Save return location: current line and the part AFTER this GOSUB
+        return_line = self.pc
+        return_part = getattr(self, 'current_part_index', 0) + 1
+        self.gosub_stack.append((return_line, return_part))
+        
         self.pc = line_num
+        self.pc_changed = True
         
     def cmd_return(self):
         """RETURN command"""
         if not self.gosub_stack:
             raise ApplesoftError("Return without gosub")
-        return_line = self.gosub_stack.pop()
-        if return_line == -1:
-            self.running = False
-        else:
+        
+        return_info = self.gosub_stack.pop()
+        if isinstance(return_info, tuple):
+            return_line, return_part = return_info
             self.pc = return_line
+            self.pending_statement_index = return_part
+            self.pc_changed = True
+        else:
+            # Old format compatibility
+            return_line = return_info
+            if return_line == -1:
+                self.running = False
+            else:
+                self.pc = return_line
+                self.pc_changed = True
             
     def cmd_if(self, args: str):
         """IF command"""
@@ -763,6 +881,16 @@ class ApplesoftInterpreter:
                 
     def cmd_for(self, args: str):
         """FOR command"""
+        # OPTIMIZATION: Check if we're already in this loop (jumped back via NEXT)
+        # If so, skip re-initialization and jump to next line
+        if self.for_stack and self.for_stack[-1]['line'] == self.pc:
+            # Already in this loop - just continue (jump to next line)
+            next_line = self.get_next_line(self.pc)
+            if next_line:
+                self.pc = next_line
+                self.pc_changed = True
+            return
+        
         # Parse: FOR var = start TO end [STEP step]
         match = re.match(r'(\w+)\s*=\s*(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+))?$', args, re.IGNORECASE)
         if not match:
@@ -777,15 +905,17 @@ class ApplesoftInterpreter:
         self.variables[var] = start
         
         # Push loop info onto stack
-        self.for_stack.append({
+        loop_info = {
             'var': var,
             'end': end,
             'step': step,
-            'line': self.pc
-        })
+            'line': self.pc,
+            'resume_part': getattr(self, 'current_part_index', 0) + 1
+        }
+        self.for_stack.append(loop_info)
         
     def cmd_next(self, args: str):
-        """NEXT command"""
+        """NEXT command - optimized to run tight loops in Python with real Apple II timing"""
         if not self.for_stack:
             raise ApplesoftError("Next without for")
             
@@ -795,7 +925,45 @@ class ApplesoftInterpreter:
         
         if var and var != loop['var']:
             raise ApplesoftError("Next without for")
+        
+        # FAST PATH: If the loop body is just "NEXT" (tight loop with no statements between FOR and NEXT)
+        # detect this and execute all remaining iterations in a tight Python loop
+        for_line = loop['line']
+        next_line = self.get_next_line(for_line)
+        
+        if next_line == self.pc:
+            # This is a tight loop - FOR on one line, NEXT on the very next line with nothing in between
+            # Execute remaining iterations in tight Python loop with real Apple II timing
+            loop_var = loop['var']
+            end_val = loop['end']
+            step_val = loop['step']
             
+            # Add delay to match real Apple II speed (~40 seconds for 30,000 iterations)
+            # Calibrated delay: 0.00075 seconds per iteration
+            loop_delay = 0.00075
+            
+            # Execute remaining iterations without going through interpreter
+            while True:
+                self.variables[loop_var] += step_val
+                
+                # Check if done
+                if step_val > 0:
+                    done = self.variables[loop_var] > end_val
+                else:
+                    done = self.variables[loop_var] < end_val
+                
+                if done:
+                    break
+                
+                # Add timing delay to match real Apple II
+                if loop_delay > 0:
+                    time.sleep(loop_delay)
+            
+            self.for_stack.pop()
+            # Continue to next statement after NEXT
+            return
+        
+        # Normal loop with body (statements between FOR and NEXT)
         # Increment loop variable
         self.variables[loop['var']] += loop['step']
         
@@ -807,17 +975,12 @@ class ApplesoftInterpreter:
             
         if done:
             self.for_stack.pop()
-            # Continue to next line after NEXT
+            # Continue to next statement after NEXT (don't jump)
         else:
-            # Return to the line AFTER the FOR (the first line of the loop body)
-            # We need to find the next line after the FOR line
-            for_line = loop['line']
-            next_after_for = self.get_next_line(for_line)
-            if next_after_for:
-                self.pc = next_after_for
-            else:
-                # No line after FOR? Something is wrong
-                self.for_stack.pop()
+            # Jump back to the statement after FOR to repeat loop body
+            self.pc = for_line
+            self.pending_statement_index = loop.get('resume_part', 0)
+            self.pc_changed = True
             
     def cmd_input(self, args: str):
         """INPUT command"""
@@ -1047,6 +1210,7 @@ class ApplesoftInterpreter:
                 pygame.draw.rect(self.text_surface, (0, 0, 0), rect)
                 self.text_x = 0
                 self.text_y = 20
+            self.update_display()
         else:
             # Clear console
             import os
@@ -1067,6 +1231,9 @@ class ApplesoftInterpreter:
             # Create GR surface
             self.gr_surface = pygame.Surface((self.GR_WIDTH * 14, self.GR_HEIGHT * 8))
             self.gr_surface.fill((0, 0, 0))
+            self.update_display()
+        # Clear lo-res buffer
+        self.gr_buffer = [[0] * self.GR_WIDTH for _ in range(self.GR_HEIGHT)]
             
     def cmd_hgr(self):
         """HGR command - switch to hi-res graphics page 1"""
@@ -1101,10 +1268,12 @@ class ApplesoftInterpreter:
                 self.hgr_page1_surface = pygame.Surface((560, 384))
             self.hgr_page1_surface.fill((0, 0, 0))
             self.hgr_surface = self.hgr_page1_surface
-            # Create text surface if needed (don't clear it - preserve existing text)
+            # Preserve text surface content - don't recreate it
             if not self.text_surface:
                 self.text_surface = pygame.Surface((560, 384))
                 self.text_surface.fill((0, 0, 0))
+            # Update display immediately to show the mode switch
+            self.update_display()
         self._ensure_hgr_memory()
         self._clear_hgr_memory_page(1)
         self._set_active_hgr_memory(1)
@@ -1140,6 +1309,8 @@ class ApplesoftInterpreter:
         if self.artifact_mode and PYGAME_AVAILABLE and self.hgr_surface:
             self._render_full_hgr_page()
         # Don't reset cursor - leave it where it was
+        if PYGAME_AVAILABLE:
+            self.update_display()
             
     def cmd_color(self, args: str):
         """COLOR command - set low-res color"""
@@ -1147,6 +1318,8 @@ class ApplesoftInterpreter:
             args = args.split('=')[1].strip()
         color = int(self.evaluate(args))
         self.gr_color = color % 16
+        if PYGAME_AVAILABLE:
+            self.update_display()
         
     def cmd_plot(self, args: str):
         """PLOT command - plot a point in low-res graphics"""
@@ -1159,6 +1332,11 @@ class ApplesoftInterpreter:
             # Each GR pixel is 14x8 screen pixels (approx)
             rect = pygame.Rect(x * 14, y * 8, 14, 8)
             pygame.draw.rect(self.gr_surface, color, rect)
+        # Update buffer if in range
+        if 0 <= x < self.GR_WIDTH and 0 <= y < self.GR_HEIGHT:
+            self.gr_buffer[y][x] = self.gr_color % 16
+        if PYGAME_AVAILABLE:
+            self.update_display()
             
     def cmd_hlin(self, args: str):
         """HLIN command - horizontal line in low-res"""
@@ -1176,6 +1354,10 @@ class ApplesoftInterpreter:
             for x in range(min(x1, x2), max(x1, x2) + 1):
                 rect = pygame.Rect(x * 14, y * 8, 14, 8)
                 pygame.draw.rect(self.gr_surface, color, rect)
+        if 0 <= y < self.GR_HEIGHT:
+            for x in range(min(x1, x2), max(x1, x2) + 1):
+                if 0 <= x < self.GR_WIDTH:
+                    self.gr_buffer[y][x] = self.gr_color % 16
                 
     def cmd_vlin(self, args: str):
         """VLIN command - vertical line in low-res"""
@@ -1193,6 +1375,10 @@ class ApplesoftInterpreter:
             for y in range(min(y1, y2), max(y1, y2) + 1):
                 rect = pygame.Rect(x * 14, y * 8, 14, 8)
                 pygame.draw.rect(self.gr_surface, color, rect)
+        if 0 <= x < self.GR_WIDTH:
+            for y in range(min(y1, y2), max(y1, y2) + 1):
+                if 0 <= y < self.GR_HEIGHT:
+                    self.gr_buffer[y][x] = self.gr_color % 16
 
     # ---- HGR artifact helpers -------------------------------------------------
 
@@ -1347,6 +1533,39 @@ class ApplesoftInterpreter:
         for b in (byte_idx - 1, byte_idx, byte_idx + 1):
             self._refresh_artifact_byte(y, b)
 
+    def _write_hgr_memory_pixel(self, x: int, y: int, color_index: int):
+        """Update HGR backing memory/color maps without drawing."""
+        if not (0 <= x < self.HGR_WIDTH and 0 <= y < self.HGR_HEIGHT):
+            return
+        memory = self._get_active_hgr_memory()
+        whites = self._get_active_white_map()
+        colors = self._get_active_color_map()
+        byte_idx = x // 7
+        bit_idx = x % 7
+
+        hi_flag = 1 if color_index >= 4 else 0
+        set_on = color_index not in (0, 4)
+        force_white = color_index in (3, 7)
+
+        byte_val = memory[y][byte_idx]
+        if hi_flag:
+            byte_val |= 0x80
+        else:
+            byte_val &= 0x7F
+
+        if set_on:
+            byte_val |= (1 << bit_idx)
+        else:
+            byte_val &= ~(1 << bit_idx)
+            whites[y][x] = False
+        if force_white and set_on:
+            whites[y][x] = True
+        elif not set_on:
+            whites[y][x] = False
+
+        colors[y][x] = color_index if set_on else -1
+        memory[y][byte_idx] = byte_val
+
     def _draw_line_artifact(self, x1: int, y1: int, x2: int, y2: int, color_to_use: int):
         """Bresenham line in artifact mode over the 280x192 grid."""
         if not (PYGAME_AVAILABLE and self.hgr_surface):
@@ -1375,9 +1594,11 @@ class ApplesoftInterpreter:
             args = args.split('=')[1].strip()
         color = int(self.evaluate(args))
         self.hgr_color = color % 8
+        if PYGAME_AVAILABLE:
+            self.update_display()
         
-    def _draw_line_bresenham(self, x1: int, y1: int, x2: int, y2: int, color: tuple):
-        """Draw a line using Bresenham algorithm directly on pygame surface"""
+    def _draw_line_bresenham(self, x1: int, y1: int, x2: int, y2: int, color: tuple, color_index: int):
+        """Draw a line using Bresenham algorithm directly on pygame surface and update HGR memory."""
         dx = abs(x2 - x1)
         dy = abs(y2 - y1)
         sx = 1 if x1 < x2 else -1
@@ -1388,6 +1609,7 @@ class ApplesoftInterpreter:
         while True:
             rect = pygame.Rect(x * 2, y * 2, 2, 2)
             self.hgr_surface.fill(color, rect)
+            self._write_hgr_memory_pixel(x, y, color_index)
             if x == x2 and y == y2:
                 break
             e2 = 2 * err
@@ -1453,14 +1675,16 @@ class ApplesoftInterpreter:
                             for y in range(min(y1, y2), max(y1, y2) + 1):
                                 rect = pygame.Rect(x1 * 2, y * 2, 2, 2)
                                 self.hgr_surface.fill(color, rect)
+                                self._write_hgr_memory_pixel(x1, y, self.hgr_color)
                         elif y1 == y2:
                             # Horizontal line
                             for x in range(min(x1, x2), max(x1, x2) + 1):
                                 rect = pygame.Rect(x * 2, y1 * 2, 2, 2)
                                 self.hgr_surface.fill(color, rect)
+                                self._write_hgr_memory_pixel(x, y1, self.hgr_color)
                         else:
                             # Diagonal - use Bresenham
-                            self._draw_line_bresenham(x1, y1, x2, y2, color)
+                            self._draw_line_bresenham(x1, y1, x2, y2, color, self.hgr_color)
                 self.hgr_x = x2
                 self.hgr_y = y2
             else:
@@ -1477,8 +1701,13 @@ class ApplesoftInterpreter:
                 elif self.graphics_mode in ['HGR', 'HGR2'] and PYGAME_AVAILABLE and self.hgr_surface:
                     color = self.HGR_COLORS[self.hgr_color]
                     pygame.draw.circle(self.hgr_surface, color, (x * 2, y * 2), 2)
+                    self._write_hgr_memory_pixel(x, y, self.hgr_color)
+                else:
+                    self._write_hgr_memory_pixel(x, y, self.hgr_color)
                 self.hgr_x = x
                 self.hgr_y = y
+        if PYGAME_AVAILABLE:
+            self.update_display()
                 
     def cmd_htab(self, args: str):
         """HTAB command - set horizontal cursor position"""
@@ -1493,46 +1722,99 @@ class ApplesoftInterpreter:
     def cmd_inverse(self, args: str):
         """INVERSE command - enable inverse video"""
         self.inverse = True
+        if PYGAME_AVAILABLE:
+            self.update_display()
         
     def cmd_normal(self, args: str):
         """NORMAL command - disable inverse video"""
         self.inverse = False
+        if PYGAME_AVAILABLE:
+            self.update_display()
         
     def cmd_poke(self, args: str):
-        """POKE command - handle key softswitches for graphics/mixed mode and page selection"""
+        """POKE command - write to memory and handle key softswitches"""
         # Parse: POKE addr, value
         parts = [p.strip() for p in args.split(',')]
         if len(parts) < 2:
             raise ApplesoftError("Syntax error in POKE")
         addr = int(self.evaluate(parts[0]))
         val = int(self.evaluate(parts[1]))
+        
+        # Ensure value is in valid byte range (0-255)
+        val = val & 0xFF
+        
         # Map negative addresses to unsigned (Apple II two's complement addressing)
         if addr < 0:
             addr = (addr + 65536) % 65536
-        # Recognize softswitches described by user
-        # 49234 ($C052) and -16302: full-page graphics, no text (disable mixed)
-        if addr == 49234:
+        
+        # Clamp address to 16-bit range
+        addr = addr & 0xFFFF
+        
+        # Write to memory array
+        self.memory[addr] = val
+        
+        # Handle special address ranges with side effects
+        
+        # Text window margins (32-35)
+        if addr == 32:  # Left margin
+            pass
+        elif addr == 33:  # Text window width
+            pass
+        elif addr == 34:  # Top margin
+            pass
+        elif addr == 35:  # Bottom margin
+            pass
+        
+        # Video mode and text attributes (address 50)
+        elif addr == 50:
+            if val == 63:      # INVERSE
+                self.inverse = True
+                self.flash = False
+            elif val == 127:   # FLASH
+                self.flash = True
+                self.inverse = False
+            elif val == 255:   # NORMAL
+                self.inverse = False
+                self.flash = False
+            elif val == 128:   # Listings and CATALOGs invisible (flag, we'll ignore)
+                pass
+        
+        # Cursor position (36-37)
+        elif addr == 36:  # Cursor X position
+            self.text_x = val % self.TEXT_COLS
+        elif addr == 37:  # Cursor Y position
+            self.text_y = val % self.TEXT_ROWS
+        
+        # Shape table address (232-233) - 2-byte pointer
+        elif addr == 232 or addr == 233:
+            pass  # Store in memory for PEEK
+        
+        # SPEED (241)
+        elif addr == 241:
+            pass  # 256-SPEED, used for display refresh rate
+        
+        # Graphics mode softswitches (Apple II memory-mapped I/O at $C0xx)
+        # These are typically accessed via addresses 49152-49407 ($C000-$C0FF)
+        
+        # $C050: TEXT mode (off=graphics)
+        elif addr == 49232 or addr == ((-16304 + 65536) % 65536):
+            self.graphics_mode = 'TEXT'
+        
+        # $C051: GR mode (off=HGR)
+        elif addr == 49233 or addr == ((-16303 + 65536) % 65536):
+            if self.graphics_mode not in ('HGR', 'HGR2'):
+                self.graphics_mode = 'GR'
+        
+        # $C052: Full screen graphics - no text (disable mixed mode)
+        elif addr == 49234 or addr == ((-16302 + 65536) % 65536):
             self.hgr_mixed = False
-            return
-        # 49235 ($C053) and -16301: mixed mode text on (enable mixed)
-        if addr == 49235 or addr == ((-16301 + 65536) % 65536):
+        
+        # $C053: Mixed mode text on (enable mixed mode)
+        elif addr == 49235 or addr == ((-16301 + 65536) % 65536):
             self.hgr_mixed = True
-            return
-        # -16299 ($C055): select HGR page 2
-        if addr == 49237:
-            self.hgr_page = 2
-            # Switch current drawing surface
-            if PYGAME_AVAILABLE:
-                if not self.hgr_page2_surface:
-                    self.hgr_page2_surface = pygame.Surface((560, 384))
-                    self.hgr_page2_surface.fill((0, 0, 0))
-                self.hgr_surface = self.hgr_page2_surface
-            self._set_active_hgr_memory(2)
-            if self.artifact_mode and PYGAME_AVAILABLE and self.hgr_surface:
-                self._render_full_hgr_page()
-            return
-        # -16300 ($C054): select HGR page 1
-        if addr == 49236:
+        
+        # $C054: Select HGR page 1
+        elif addr == 49236 or addr == ((-16300 + 65536) % 65536):
             self.hgr_page = 1
             if PYGAME_AVAILABLE:
                 if not self.hgr_page1_surface:
@@ -1542,48 +1824,256 @@ class ApplesoftInterpreter:
             self._set_active_hgr_memory(1)
             if self.artifact_mode and PYGAME_AVAILABLE and self.hgr_surface:
                 self._render_full_hgr_page()
-            return
-        # -16302 ($C052): also full screen graphics - no text
-        if addr == ((-16302 + 65536) % 65536):
-            self.hgr_mixed = False
-            return
-        # Other POKEs are ignored
-        return
+        
+        # $C055: Select HGR page 2
+        elif addr == 49237 or addr == ((-16299 + 65536) % 65536):
+            self.hgr_page = 2
+            if PYGAME_AVAILABLE:
+                if not self.hgr_page2_surface:
+                    self.hgr_page2_surface = pygame.Surface((560, 384))
+                    self.hgr_page2_surface.fill((0, 0, 0))
+                self.hgr_surface = self.hgr_page2_surface
+            self._set_active_hgr_memory(2)
+            if self.artifact_mode and PYGAME_AVAILABLE and self.hgr_surface:
+                self._render_full_hgr_page()
+        
+        # $C056: Lo-res graphics
+        elif addr == 49238 or addr == ((-16298 + 65536) % 65536):
+            if self.graphics_mode != 'TEXT':
+                self.graphics_mode = 'GR'
+        
+        # $C057: Hi-res graphics
+        elif addr == 49239 or addr == ((-16297 + 65536) % 65536):
+            self.graphics_mode = 'HGR' if self.hgr_page == 1 else 'HGR2'
+        
+        # Keyboard input (49152, -16384)
+        elif addr == 49152 or addr == ((-16384 + 65536) % 65536):
+            # Writing to keyboard address - typically not done in BASIC
+            pass
+        
+        # Joystick/paddle inputs ($C064-$C067)
+        elif 49252 <= addr <= 49255:  # $C064-$C067
+            pass  # ADC addresses
+        elif ((-16284 + 65536) % 65536) <= addr <= ((-16281 + 65536) % 65536):
+            pass
+        
+        # Joystick output ($C058-$C05F)
+        elif 49240 <= addr <= 49247:  # $C058-$C05F
+            pass  # Joystick outputs (analog control lines)
+        elif ((-16296 + 65536) % 65536) <= addr <= ((-16289 + 65536) % 65536):
+            pass
+        
+        # Annunciator outputs (hand control connector pins)
+        # POKE -16295, 0 = Annunciator 0 on (pin 15)
+        elif addr == 49241 or addr == ((-16295 + 65536) % 65536):
+            pass  # Annunciator 0 on
+        # POKE -16296, 0 = Annunciator 0 off (pin 15)
+        elif addr == 49240 or addr == ((-16296 + 65536) % 65536):
+            pass  # Annunciator 0 off
+        # POKE -16293, 0 = Annunciator 1 on (pin 14)
+        elif addr == 49243 or addr == ((-16293 + 65536) % 65536):
+            pass  # Annunciator 1 on
+        # POKE -16294, 0 = Annunciator 1 off (pin 14)
+        elif addr == 49242 or addr == ((-16294 + 65536) % 65536):
+            pass  # Annunciator 1 off
+        # POKE -16291, 0 = Annunciator 2 on (pin 13)
+        elif addr == 49245 or addr == ((-16291 + 65536) % 65536):
+            pass  # Annunciator 2 on
+        # POKE -16292, 0 = Annunciator 2 off (pin 13)
+        elif addr == 49244 or addr == ((-16292 + 65536) % 65536):
+            pass  # Annunciator 2 off
+        # POKE -16289, 0 = Annunciator 3 on (pin 12)
+        elif addr == 49247 or addr == ((-16289 + 65536) % 65536):
+            pass  # Annunciator 3 on
+        # POKE -16290, 0 = Annunciator 3 off (pin 12)
+        elif addr == 49246 or addr == ((-16290 + 65536) % 65536):
+            pass  # Annunciator 3 off
+        
+        # Error handling
+        # POKE 216, 0 = Restore normal error handling
+        elif addr == 216:
+            if val == 0:
+                self.error_handler_line = None
+            self.memory[216] = val
+        
+        # Speaker ($C030)
+        elif addr == 49200 or addr == ((-16336 + 65536) % 65536):
+            # Speaker click
+            self._speaker_click()
+        
+        # Other addresses are stored in memory but have no special effect in our interpreter
 
     def cmd_call(self, args: str):
-        """CALL command - handle selected monitor subroutines used in examples"""
-        # For now, implement CALL 62454: fill current HGR page with last HCOLOR
+        """CALL command - handle Apple II monitor subroutines"""
         addr = int(self.evaluate(args.strip()))
-        if addr == 62454 and PYGAME_AVAILABLE and self.hgr_surface:
-            if self.artifact_mode:
-                # Fill backing memory using current palette bit then repaint
+        
+        # Handle common Apple II ROM routines
+        if addr == 62454 or addr == 0xF3F6:
+            # HGR screen fill with current HCOLOR
+            # This fills the entire HGR screen with the current color
+            if self.graphics_mode in ['HGR', 'HGR2'] and PYGAME_AVAILABLE and self.hgr_surface:
+                # Get current HCOLOR and use the same color palette as HPLOT
+                color = self.hgr_color
+                rgb = self.HGR_COLORS[color % len(self.HGR_COLORS)]
+                self.hgr_surface.fill(rgb)
+                # Also fill the HGR memory representation
                 self._ensure_hgr_memory()
-                memory = self._get_active_hgr_memory()
-                whites = self._get_active_white_map()
-                colors = self._get_active_color_map()
-                hi_flag = 1 if self.hgr_color >= 4 else 0
-                set_on = self.hgr_color not in (0, 4)
-                force_white = self.hgr_color in (3, 7)
-                fill_byte = (0x80 if hi_flag else 0) | (0x7F if set_on else 0)
-                for y in range(self.HGR_HEIGHT):
-                    memory[y] = [fill_byte] * 40
-                    if force_white and set_on:
-                        whites[y] = [True] * self.HGR_WIDTH
-                    else:
-                        whites[y] = [False] * self.HGR_WIDTH
-                    colors[y] = [self.hgr_color if set_on else -1] * self.HGR_WIDTH
-                self._render_full_hgr_page()
+                target = self.hgr_memory_page2 if self.hgr_page == 2 else self.hgr_memory_page1
+                if target:
+                    # Fill memory with the pattern for this color
+                    fill_byte = 0xFF if color & 1 else 0x00
+                    for row in range(len(target)):
+                        for col in range(len(target[row])):
+                            target[row][col] = fill_byte
+                self.update_display()
+        # Other CALL addresses could be added here
+
+
+    def _speaker_click(self):
+        """Produce a short click/beep to emulate Apple II speaker toggle."""
+        now = time.time()
+        # Rate limit to avoid thousands of blocking beeps in tight loops
+        if (now - self._last_speaker_click) < self._speaker_click_min_interval:
+            return
+        self._last_speaker_click = now
+        try:
+            if WINSOUND_AVAILABLE and os.name == 'nt':
+                # Short, quiet-ish beep
+                winsound.Beep(880, 20)  # 880 Hz for 20 ms
+            elif PYGAME_AVAILABLE:
+                # Fallback: play a short synthesized click via pygame.mixer
+                self._ensure_click_sound()
+                if self._click_sound is not None:
+                    try:
+                        self._click_sound.play()
+                    except Exception:
+                        pass
             else:
-                color = self.HGR_COLORS[self.hgr_color]
-                self.hgr_surface.fill(color)
-        elif addr == 65000 and PYGAME_AVAILABLE and self.screen:
-            # Save a screenshot and evaluate mixed overlay presence
-            try:
-                self.save_screenshot('call65000')
-            except Exception as e:
-                print(f"Screenshot error: {e}")
-        # Otherwise no-op
-        return
+                # Last resort: print a dot to indicate a click
+                print('.', end='')
+        except Exception:
+            # Ignore sound errors
+            pass
+
+    def _ensure_click_sound(self):
+        """Initialize pygame.mixer and prepare a short click sound if needed."""
+        if not PYGAME_AVAILABLE:
+            return
+        try:
+            if not self._mixer_ready:
+                # Initialize mixer for 16-bit mono at 44100 Hz
+                pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=256)
+                self._mixer_ready = True
+            if self._click_sound is None:
+                # Generate a very short square wave burst (about 10ms)
+                import array
+                sample_rate = 44100
+                duration_sec = 0.01
+                freq = 1000  # 1 kHz click
+                total_samples = int(sample_rate * duration_sec)
+                # 16-bit signed amplitude
+                amp = 12000
+                samples = array.array('h')
+                for n in range(total_samples):
+                    # simple square wave
+                    t = (n * freq) // sample_rate
+                    val = amp if (t % 2 == 0) else -amp
+                    samples.append(val)
+                # Convert to bytes in current mixer format (16-bit signed mono)
+                snd_bytes = samples.tobytes()
+                self._click_sound = pygame.mixer.Sound(buffer=snd_bytes)
+        except Exception:
+            # If mixer init or sound creation fails, keep fallback disabled
+            self._click_sound = None
+            self._mixer_ready = False
+
+    def split_args(self, arg_str: str) -> List[str]:
+        """Split a comma-separated argument list, respecting parentheses and strings."""
+        parts = []
+        current = []
+        depth = 0
+        in_string = False
+        i = 0
+        while i < len(arg_str):
+            ch = arg_str[i]
+            if ch == '"':
+                in_string = not in_string
+                current.append(ch)
+            elif not in_string:
+                if ch == '(':
+                    depth += 1
+                    current.append(ch)
+                elif ch == ')':
+                    depth = max(0, depth - 1)
+                    current.append(ch)
+                elif ch == ',' and depth == 0:
+                    parts.append(''.join(current).strip())
+                    current = []
+                else:
+                    current.append(ch)
+            else:
+                current.append(ch)
+            i += 1
+        if current:
+            parts.append(''.join(current).strip())
+        return parts
+
+    def cmd_sound(self, args: str):
+        """SOUND freq, duration_ms[, volume] -- convenience tone helper (non-Applesoft original)."""
+        parts = [p.strip() for p in self.split_args(args)]
+        if len(parts) < 2:
+            raise ApplesoftError("SOUND requires freq,duration")
+        freq = float(self.evaluate(parts[0]))
+        duration_ms = float(self.evaluate(parts[1]))
+        volume = 0.5
+        if len(parts) >= 3:
+            volume = float(self.evaluate(parts[2]))
+        self._play_tone(freq, duration_ms, volume)
+
+    def _play_tone(self, freq_hz: float, duration_ms: float, volume: float = 0.5):
+        """Generate a tone via winsound (Windows) or pygame mixer; falls back to clicks."""
+        if duration_ms <= 0 or freq_hz <= 0:
+            return
+        volume = max(0.0, min(1.0, volume))
+        try:
+            if WINSOUND_AVAILABLE and os.name == 'nt':
+                winsound.Beep(int(freq_hz), int(duration_ms))
+                return
+        except Exception:
+            pass
+
+        if not PYGAME_AVAILABLE:
+            # Fallback: approximate with repeated clicks
+            cycles = int((duration_ms / 1000.0) * 10)
+            for _ in range(max(1, cycles)):
+                self._speaker_click()
+            return
+
+        try:
+            # Ensure mixer and build a sine buffer for the given tone
+            if not self._mixer_ready:
+                pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=256)
+                self._mixer_ready = True
+            sample_rate = 44100
+            duration_sec = duration_ms / 1000.0
+            total_samples = int(sample_rate * duration_sec)
+            import array, math as _math
+            amp = int(30000 * volume)
+            samples = array.array('h')
+            two_pi_f = 2 * _math.pi * freq_hz
+            for n in range(total_samples):
+                t = n / sample_rate
+                val = int(amp * _math.sin(two_pi_f * t))
+                samples.append(val)
+            snd_bytes = samples.tobytes()
+            tone = pygame.mixer.Sound(buffer=snd_bytes)
+            tone.play()
+            # Busy wait for completion to keep timing closer to duration
+            time.sleep(duration_sec)
+        except Exception:
+            # Last resort: click once
+            self._speaker_click()
+        
 
     def save_screenshot(self, label: str = 'frame'):
         """Save the current pygame window to screenshots/ with timestamp and print a brief evaluation."""
@@ -1670,6 +2160,114 @@ class ApplesoftInterpreter:
         # Not fully implemented - just add a small delay
         time.sleep(0.1)
         
+    def cmd_cont(self):
+        """CONT command - continue execution after STOP"""
+        if self.last_executed_line is not None:
+            # Find the line and set PC to it
+            for line_num in sorted(self.program.keys()):
+                if line_num >= self.last_executed_line:
+                    self.pc = line_num
+                    break
+        else:
+            raise ApplesoftError("Can't continue")
+            
+    def cmd_pop(self):
+        """POP command - remove top of GOSUB return stack"""
+        if self.return_stack:
+            self.return_stack.pop()
+        else:
+            raise ApplesoftError("Stack overflow")
+            
+    def cmd_draw(self, args: str):
+        """DRAW command - draw shape"""
+        # DRAW shape_num [AT x,y]
+        parts = re.split(r'\s+AT\s+', args, flags=re.IGNORECASE)
+        shape_num = int(self.evaluate(parts[0].strip()))
+        
+        if len(parts) > 1:
+            coords = parts[1].split(',')
+            x = int(self.evaluate(coords[0].strip()))
+            y = int(self.evaluate(coords[1].strip())) if len(coords) > 1 else 0
+        else:
+            x = 0
+            y = 0
+            
+        # Shape drawing would require shape table support
+        # For now, just plot a point
+        if self.graphics_mode == 'hires':
+            self.screen.fill((0, 0, 0))
+            if self.hires_color:
+                pygame.draw.circle(self.screen, self.hires_color, (x, y), 2)
+            pygame.display.flip()
+            
+    def cmd_xdraw(self, args: str):
+        """XDRAW command - XOR draw shape"""
+        # XDRAW shape_num [AT x,y]
+        # Similar to DRAW but uses XOR mode
+        parts = re.split(r'\s+AT\s+', args, flags=re.IGNORECASE)
+        shape_num = int(self.evaluate(parts[0].strip()))
+        
+        if len(parts) > 1:
+            coords = parts[1].split(',')
+            x = int(self.evaluate(coords[0].strip()))
+            y = int(self.evaluate(coords[1].strip())) if len(coords) > 1 else 0
+        else:
+            x = 0
+            y = 0
+            
+        # XOR drawing would require shape table support
+        # For now, just plot a point
+        if self.graphics_mode == 'hires':
+            pygame.draw.circle(self.screen, self.hires_color, (x, y), 2)
+            pygame.display.flip()
+            
+    def cmd_scale(self, args: str):
+        """SCALE command - set shape scale factor"""
+        # SCALE = value
+        try:
+            self.shape_scale = float(self.evaluate(args.strip()))
+        except:
+            raise ApplesoftError("Syntax error in SCALE")
+            
+    def cmd_rot(self, args: str):
+        """ROT command - set shape rotation"""
+        # ROT = value  (0-63, roughly 0-360 degrees)
+        try:
+            self.shape_rotation = float(self.evaluate(args.strip())) % 64
+        except:
+            raise ApplesoftError("Syntax error in ROT")
+            
+    def cmd_in(self, args: str):
+        """IN# command - set input slot for cassette/disk"""
+        # IN# slot
+        try:
+            slot = int(self.evaluate(args.strip()))
+            self.input_slot = slot
+        except:
+            raise ApplesoftError("Syntax error in IN#")
+            
+    def cmd_pr(self, args: str):
+        """PR# command - set output slot for cassette/disk/printer"""
+        # PR# slot
+        try:
+            slot = int(self.evaluate(args.strip()))
+            self.output_slot = slot
+            # Special case: PR#0 means print to console
+            if slot == 0:
+                self.output_slot = None
+        except:
+            raise ApplesoftError("Syntax error in PR#")
+            
+    def cmd_load(self, args: str):
+        """LOAD command - load program from cassette"""
+        # Not implemented - cassette I/O simulation
+        pass
+            
+    def cmd_save(self, args: str):
+        """SAVE command - save program to cassette"""
+        # Not implemented - cassette I/O simulation
+        pass
+        
     def evaluate(self, expr: str) -> Union[float, str]:
         """Evaluate an expression"""
         expr = expr.strip()
@@ -1708,7 +2306,7 @@ class ApplesoftInterpreter:
                     name_upper = 'FN' + name_upper[3:]
                 if name_upper in ['INT', 'ABS', 'SGN', 'SQR', 'SIN', 'COS', 'TAN', 
                                  'ATN', 'LOG', 'EXP', 'RND',
-                                 'PEEK', 'PDL', 'SCRN', 'POS', 'FRE']:
+                                 'PEEK', 'PDL', 'SCRN', 'HSCRN', 'POS', 'FRE']:
                     # Find the matching closing paren for this function
                     depth = 0
                     closing_paren_pos = -1
@@ -1765,6 +2363,32 @@ class ApplesoftInterpreter:
                         elif len(indices) == 2:
                             return arr[indices[0]][indices[1]]
                     
+        # Check for string concatenation with + operator
+        # But only if it's not inside a function call and involves string variables or literals
+        if '+' in expr:
+            # Try to detect if this is string concatenation (involves $ variables or quoted strings)
+            if '$' in expr or '"' in expr:
+                # Check for string concatenation pattern
+                depth = 0
+                for i in range(len(expr)):
+                    if expr[i] == '(':
+                        depth += 1
+                    elif expr[i] == ')':
+                        depth -= 1
+                    elif depth == 0 and expr[i] == '+':
+                        left = expr[:i].strip()
+                        right = expr[i+1:].strip()
+                        
+                        # Evaluate both sides - if either is a string, concatenate
+                        left_val = self.evaluate(left)
+                        right_val = self.evaluate(right)
+                        
+                        if isinstance(left_val, str) or isinstance(right_val, str):
+                            return str(left_val) + str(right_val)
+                        else:
+                            # Not string concatenation, fall through to arithmetic
+                            break
+        
         # Try to evaluate as arithmetic expression
         return self.evaluate_arithmetic(expr)
         
@@ -1909,6 +2533,11 @@ class ApplesoftInterpreter:
         try:
             return float(expr)
         except ValueError:
+            # Hex literal with $ prefix (e.g., $C000)
+            hex_match = re.match(r'^([+-]?)\$([0-9A-Fa-f]+)$', expr)
+            if hex_match:
+                sign = -1.0 if hex_match.group(1) == '-' else 1.0
+                return sign * float(int(hex_match.group(2), 16))
             pass
             
         # Base case - must be variable, function, or array
@@ -1957,8 +2586,97 @@ class ApplesoftInterpreter:
                 random.seed(int(arg))
             return random.random()
         elif func_name == 'PEEK':
-            # Return 0 for PEEK
-            return 0
+            # PEEK(address) - read from memory
+            addr = int(self.evaluate(args_str))
+            # Map negative addresses to unsigned (Apple II two's complement addressing)
+            if addr < 0:
+                addr = (addr + 65536) % 65536
+            addr = addr & 0xFFFF
+            
+            # Handle special addresses with dynamic values
+            
+            # Keyboard input at $C000 (-16384)
+            # Returns high-order bit = 1 if new character typed, low 7 bits = ASCII
+            if addr == 49152 or addr == ((-16384 + 65536) % 65536):
+                # In real Apple II: bit 7 = 1 if key pressed
+                # For now, return 0 (no key pressed)
+                return 0
+            
+            # Keyboard strobe at $C010 (-16368)
+            # Reading clears high-order bit of -16384
+            elif addr == 49168 or addr == ((-16368 + 65536) % 65536):
+                # Returns last key pressed, clearing strobe
+                val = self.memory[49152]
+                self.memory[49152] = val & 0x7F  # Clear high bit
+                return 0
+            
+            # Joystick button 0 ($C061 / -16287) - open apple key
+            elif addr == 49249 or addr == ((-16287 + 65536) % 65536):
+                # Returns > 127 if pressed, <= 127 if not
+                return 0
+            
+            # Joystick button 1 ($C062 / -16286) - solid apple key
+            elif addr == 49250 or addr == ((-16286 + 65536) % 65536):
+                # Returns > 127 if pressed, <= 127 if not
+                return 0
+            
+            # Joystick button 2 ($C063 / -16285)
+            elif addr == 49251 or addr == ((-16285 + 65536) % 65536):
+                # Returns > 127 if pressed, <= 127 if not
+                return 0
+            
+            # Joystick button 3 ($C064 / -16284) - no read available (always returns 0)
+            elif addr == 49252 or addr == ((-16284 + 65536) % 65536):
+                return 0
+            
+            # Cassette input ($C060 / -16288)
+            elif addr == 49248 or addr == ((-16288 + 65536) % 65536):
+                return 0
+            
+            # Utility strobe ($C078 / -16320) - triggers utility strobe
+            elif addr == 49272 or addr == ((-16320 + 65536) % 65536):
+                # Utility strobe trigger
+                return 0
+            
+            # Speaker ($C030 / -16336) - produces click
+            elif addr == 49200 or addr == ((-16336 + 65536) % 65536):
+                # Speaker click (reading instead of POKE produces single click)
+                return 0
+            
+            # Cassette output ($C020 / -16352) - produces cassette click
+            elif addr == 49184 or addr == ((-16352 + 65536) % 65536):
+                # Cassette output click (reading instead of POKE produces single click)
+                return 0
+            
+            # Error handling
+            # Address 216 - error handler installed flag
+            elif addr == 216:
+                # Returns > 127 if error handler installed, <= 127 if not
+                return float(128 if self.error_handler_line else 0)
+            
+            # Address 218-219 - error line number (2-byte little-endian)
+            elif addr == 218:
+                # Low byte of error line
+                line = self.current_line if self.last_error else 0
+                return float(line & 0xFF)
+            elif addr == 219:
+                # High byte of error line
+                line = self.current_line if self.last_error else 0
+                return float((line >> 8) & 0xFF)
+            
+            # Address 222 - error code
+            elif addr == 222:
+                # TODO: Map last_error to error codes (see Appendix E)
+                return 0
+            
+            # Update cursor position from memory if accessed
+            if addr == 36:  # Cursor X
+                return float(self.text_x)
+            elif addr == 37:  # Cursor Y
+                return float(self.text_y)
+            
+            # Return value from memory array
+            return float(self.memory[addr])
         elif func_name == 'PDL':
             # Return 0 for paddle
             return 0
@@ -1972,8 +2690,37 @@ class ApplesoftInterpreter:
             args = [a.strip() for a in args_str.split(',')]
             x = int(self.evaluate(args[0]))
             y = int(self.evaluate(args[1]))
-            # Return 0 for now
-            return 0
+            if 0 <= x < self.GR_WIDTH and 0 <= y < self.GR_HEIGHT:
+                return float(self.gr_buffer[y][x])
+            return 0.0
+        elif func_name == 'HSCRN':
+            # HSCRN(x,y) - extension: return hires pixel value (stub returns 0)
+            args = [a.strip() for a in args_str.split(',')]
+            if len(args) < 2:
+                return 0.0
+            x = int(self.evaluate(args[0]))
+            y = int(self.evaluate(args[1]))
+            if not (0 <= x < self.HGR_WIDTH and 0 <= y < self.HGR_HEIGHT):
+                return 0.0
+            memory = self._get_active_hgr_memory()
+            whites = self._get_active_white_map()
+            colors = self._get_active_color_map()
+            byte_idx = x // 7
+            bit_idx = x % 7
+            byte_val = memory[y][byte_idx]
+            on = (byte_val >> bit_idx) & 1
+            if not on:
+                return 0.0
+            if whites[y][x]:
+                return 3.0  # white color index
+            cidx = colors[y][x]
+            if cidx is not None and cidx >= 0:
+                return float(cidx % 8)
+            hi = (byte_val & 0x80) != 0
+            is_odd = (x % 2 == 1)
+            if hi:
+                return 5.0 if is_odd else 6.0  # orange / blue indices
+            return 1.0 if is_odd else 2.0      # green / purple indices
         else:
             raise ApplesoftError(f"Unknown function: {func_name}")
             
@@ -1991,6 +2738,11 @@ class ApplesoftInterpreter:
             try:
                 return float(s)
             except ValueError:
+                # Support hex literals like $C000
+                hex_match = re.match(r'^([+-]?)\$([0-9A-Fa-f]+)$', s.strip())
+                if hex_match:
+                    sign = -1.0 if hex_match.group(1) == '-' else 1.0
+                    return sign * float(int(hex_match.group(2), 16))
                 return 0.0
         elif func_name == 'ASC':
             s = str(self.evaluate(args_str))
@@ -2100,6 +2852,32 @@ class ApplesoftInterpreter:
         pygame.display.flip()
 
 
+def resolve_program_path(name: str) -> Optional[str]:
+    """Resolve a program path, searching common locations.
+
+    Order of preference:
+    1. Explicit absolute path
+    2. Provided relative path from CWD
+    3. CWD/basic_code/<name>
+    4. <script_dir>/basic_code/<name>
+    """
+    if not name:
+        return None
+    if os.path.isabs(name):
+        return name if os.path.isfile(name) else None
+
+    candidates = [
+        os.path.join(os.getcwd(), name),
+        os.path.join(os.getcwd(), 'basic_code', name),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'basic_code', name),
+    ]
+
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
 def main():
     """Main entry point"""
     import argparse
@@ -2122,8 +2900,10 @@ def main():
     parser.add_argument('--composite-blur', dest='composite_blur', action='store_true',
                        help='Apply horizontal composite blur effect (ghostly afterglow)')
     parser.set_defaults(composite_blur=False)
-    parser.add_argument('--delay', type=float, default=0.001,
-                       help='Statement execution delay in seconds to simulate Apple II speed (default: 0.001)')
+    parser.add_argument('--delay', type=float, default=0.0,
+                       help='Statement execution delay in seconds to simulate Apple II speed (default: 0.0 = no delay for tight loops)')
+    parser.add_argument('--auto-close', action='store_true',
+                       help='Automatically close pygame window and exit when program ends (useful for testing)')
     
     args = parser.parse_args()
     
@@ -2135,13 +2915,25 @@ def main():
         autosnap_on_end=args.autosnap_on_end,
         artifact_mode=args.artifact_mode,
         composite_blur=args.composite_blur,
-        statement_delay=args.delay
+        statement_delay=args.delay,
+        auto_close=args.auto_close
     )
     
     if args.filename:
         # Load and run program
         try:
-            interp.load_program(args.filename)
+            program_path = resolve_program_path(args.filename)
+            if not program_path:
+                searched = [
+                    os.path.join(os.getcwd(), args.filename),
+                    os.path.join(os.getcwd(), 'basic_code', args.filename),
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'basic_code', args.filename),
+                ]
+                print("Error: File not found. Tried:")
+                for path in searched:
+                    print(f"  {path}")
+                sys.exit(1)
+            interp.load_program(program_path)
             interp.run()
         except FileNotFoundError:
             print(f"Error: File not found: {args.filename}")
