@@ -197,6 +197,12 @@ class ApplesoftInterpreter:
         
         # Keyboard polling state for PEEK(-16384)
         self.last_key_code = 0  # Last key pressed (ASCII + 128 when available)
+        
+        # User-defined functions (DEF FN)
+        self.user_functions: Dict[str, tuple] = {}
+        
+        # Loaded program filename for window title
+        self.program_filename = None
 
         # Initialize pygame if needed in text mode
         if PYGAME_AVAILABLE:
@@ -231,7 +237,10 @@ class ApplesoftInterpreter:
             pygame.init()
         # Use HGR-sized window scaled by scale factor
         self.screen = pygame.display.set_mode((560 * self.scale, 384 * self.scale))
-        pygame.display.set_caption(f"Applesoft BASIC (Scale: {self.scale}x)")
+        title = f"Applesoft BASIC (Scale: {self.scale}x)"
+        if self.program_filename:
+            title = f"{title} - {self.program_filename}"
+        pygame.display.set_caption(title)
         # Load a font or fall back
         try:
             import os as _os
@@ -256,6 +265,7 @@ class ApplesoftInterpreter:
         
     def load_program(self, filename: str):
         """Load a BASIC program from a file"""
+        self.program_filename = filename
         self.program.clear()
         with open(filename, 'r') as f:
             for line in f:
@@ -1397,7 +1407,10 @@ class ApplesoftInterpreter:
             if not self.screen or self.screen.get_size() != expected_size:
                 pygame.init()
                 self.screen = pygame.display.set_mode(expected_size)
-                pygame.display.set_caption(f"Applesoft BASIC (Scale: {self.scale}x)")
+                title = f"Applesoft BASIC (Scale: {self.scale}x)"
+                if self.program_filename:
+                    title = f"{title} - {self.program_filename}"
+                pygame.display.set_caption(title)
                 # Need to reload font after pygame.init()
                 import os
                 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1444,7 +1457,10 @@ class ApplesoftInterpreter:
             if not self.screen or self.screen.get_size() != expected_size:
                 pygame.init()
                 self.screen = pygame.display.set_mode(expected_size)
-                pygame.display.set_caption(f"Applesoft BASIC (Scale: {self.scale}x)")
+                title = f"Applesoft BASIC (Scale: {self.scale}x)"
+                if self.program_filename:
+                    title = f"{title} - {self.program_filename}"
+                pygame.display.set_caption(title)
             # Create/clear HGR page 2 surface and select it
             if not self.hgr_page2_surface:
                 self.hgr_page2_surface = pygame.Surface((560, 384))

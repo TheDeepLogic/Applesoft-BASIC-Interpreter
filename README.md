@@ -75,6 +75,10 @@ pip install pygame
 python applesoft.py program.bas
 ```
 
+### Text Mode Example:
+
+![Text mode output showing PRINT and other commands](inc/test_all_commands.png)
+
 ### Interactive mode:
 
 ```bash
@@ -741,6 +745,44 @@ The Applesoft BASIC interpreter is production-ready with:
 
 ---
 
+## Lemon Drop Game
+
+This interpreter successfully runs **Lemon Drop**, a classic Apple II game from the book *"Kids to Kids on the Apple Computer"* by Billy Sanders and Sam Edge, published by Datamost in 1984.
+
+### Play the Game:
+
+```bash
+python applesoft.py basic_code/games/lemon_drop.bas --delay 0.001 --blit-per-line
+```
+
+### About the Game:
+
+Lemon Drop is a fast-paced shooting game featuring:
+- **Gameplay**: Control a cannon and shoot upward to destroy falling lemons
+- **Controls**:
+  - **← →** (Arrow keys): Move cannon left/right
+  - **SPACE**: Fire
+- **Scoring**: Each lemon destroyed increases your score
+- **Challenge**: Avoid letting the lemons reach the bottom!
+
+The game demonstrates authentic Apple II game mechanics including:
+- Low-resolution (GR) graphics with color artifacts
+- Collision detection using `SCRN()` function
+- Real-time input handling with Apple II keyboard semantics
+- Proper screen scrolling and sprite animation timing
+
+### Running Notes:
+
+- Use `--delay 0.001` and `--blit-per-line` flags for optimal gameplay speed and visual responsiveness
+- The game uses the `SCRN()` function with adjacency patterns for pixel-perfect collision detection
+- Arrow keys and spacebar are mapped to the Apple II keyboard softswitches for authentic input
+
+### Game Screenshots:
+
+![Lemon Drop gameplay example](inc/lemon_drop.png)
+
+---
+
 ## Testing
 
 ### Run All Tests
@@ -767,6 +809,10 @@ python applesoft.py basic_code/control_flow/test_for_performance.bas --auto-clos
 # Run with screenshots
 python applesoft.py basic_code/graphics_hires/test_snow.bas --autosnap-on-end
 ```
+
+### Graphics Demonstration:
+
+![High-resolution graphics demonstration - animated snow effect](inc/test_snow.png)
 
 ### Test Categories
 
@@ -828,6 +874,8 @@ Based on the original Applesoft BASIC written by Marc McDonald and Randy Wiggint
 Thanks to [Joshua Bell](https://www.calormen.com/jsbasic/) for [JSBASIC](https://github.com/inexorabletash/jsbasic/).
 
 Font credits to PrintChar21.ttf and PRNumber3.ttf creators.
+
+**Game Attribution**: Lemon Drop game by Billy Sanders and Sam Edge, from *"Kids to Kids on the Apple Computer"*, published by Datamost, 1984. This interpreter successfully runs the original BASIC source code without modification.
 
 ---
 
