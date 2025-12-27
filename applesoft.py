@@ -239,7 +239,9 @@ class ApplesoftInterpreter:
         self.screen = pygame.display.set_mode((560 * self.scale, 384 * self.scale))
         title = f"Applesoft BASIC (Scale: {self.scale}x)"
         if self.program_filename:
-            title = f"{title} - {self.program_filename}"
+            import os
+            basename = os.path.splitext(os.path.basename(self.program_filename))[0]
+            title = f"{title} - [{basename}]"
         pygame.display.set_caption(title)
         # Load a font or fall back
         try:
@@ -1409,7 +1411,9 @@ class ApplesoftInterpreter:
                 self.screen = pygame.display.set_mode(expected_size)
                 title = f"Applesoft BASIC (Scale: {self.scale}x)"
                 if self.program_filename:
-                    title = f"{title} - {self.program_filename}"
+                    import os as _os2
+                    basename = _os2.path.splitext(_os2.path.basename(self.program_filename))[0]
+                    title = f"{title} - [{basename}]"
                 pygame.display.set_caption(title)
                 # Need to reload font after pygame.init()
                 import os
@@ -1459,7 +1463,9 @@ class ApplesoftInterpreter:
                 self.screen = pygame.display.set_mode(expected_size)
                 title = f"Applesoft BASIC (Scale: {self.scale}x)"
                 if self.program_filename:
-                    title = f"{title} - {self.program_filename}"
+                    import os as _os3
+                    basename = _os3.path.splitext(_os3.path.basename(self.program_filename))[0]
+                    title = f"{title} - [{basename}]"
                 pygame.display.set_caption(title)
             # Create/clear HGR page 2 surface and select it
             if not self.hgr_page2_surface:
