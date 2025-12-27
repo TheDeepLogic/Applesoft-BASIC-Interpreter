@@ -842,6 +842,8 @@ python applesoft.py basic_code/graphics_hires/test_snow.bas --autosnap-on-end
 - **Keyboard Softswitches**: `PEEK(-16384)` returns the last key with the high bit set; `POKE(-16368,0)` clears the keyboard strobe.
 - **IF THEN Grouping**: Colon-separated `THEN` actions are treated as a single conditional group and only execute when the condition is true.
 - **SCRN Collision Behavior (GR)**: To preserve gameplay expected on Apple II, `SCRN(x,y)` will report `15` when the cell above `(x,y-1)` is `15` and your program is checking for collisions in the common adjacency pattern (e.g., bullet at `(XX, Y-1)` vs. target at `(X, Y)`). This mirrors visual overlap used by some classic games.
+- **DOS Command Chaining**: `CHR$(4)` prefix triggers DOS command interpretation. When `PRINT CHR$(4);"RUN FILENAME"` is executed, the interpreter will automatically find and run the specified program in the same directory. Enables authentic program chaining like on the Apple II.
+- **GR Mixed Mode**: Low-resolution graphics (GR) mode automatically displays text at the bottom 4 rows of the screen when using `HTAB` and `PRINT` commands, matching authentic Apple II mixed graphics/text behavior.
 
 ---
 
