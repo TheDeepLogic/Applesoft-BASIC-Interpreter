@@ -725,6 +725,36 @@ class ApplesoftInterpreter:
             else:
                 raise ApplesoftError(f"Syntax error: Unknown command '{cmd}'")
                 
+    def handle_dos_command(self, command: str):
+        """Handle DOS commands like RUN (triggered by CHR$(4) output)"""
+        command = command.strip().upper()
+        
+        # Parse RUN command: "RUN FILENAME" or "RUN M7"
+        if command.startswith('RUN '):
+            prog_name = command[4:].strip()
+            if not prog_name:
+                return
+            
+            # Get directory of current program
+            if not self.program_filename:
+                return
+            
+            import os
+            current_dir = os.path.dirname(os.path.abspath(self.program_filename))
+            
+            # Try to find the program with .bas extension
+            prog_path = os.path.join(current_dir, prog_name + '.bas')
+            if not os.path.exists(prog_path):
+                # Try without extension if it was already provided
+                prog_path = os.path.join(current_dir, prog_name)
+            
+            if os.path.exists(prog_path):
+                # Clear current program and load the new one
+                self.reset()
+                self.load_program(prog_path)
+                # Run from the start
+                self.run()
+
     def cmd_print(self, args: str):
         """PRINT command"""
         if not args:
@@ -768,6 +798,25 @@ class ApplesoftInterpreter:
                     output.append(str(value))
                     
         text = ''.join(str(x) for x in output)
+        
+        # Check for DOS command prefix (CHR$(4)) followed by command
+        if '\x04' in text:  # CHR$(4) is ASCII 4
+            # Split on the DOS prefix character
+            parts = text.split('\x04')
+            if len(parts) > 1:
+                # Print the part before the prefix normally
+                if parts[0]:
+                    if not args.rstrip().endswith(';') and not args.rstrip().endswith(','):
+                        print(parts[0])
+                    else:
+                        print(parts[0], end='')
+                    if PYGAME_AVAILABLE:
+                        self.render_text_to_surface(parts[0] + ('\n' if not args.rstrip().endswith(';') and not args.rstrip().endswith(',') else ''))
+                
+                # The part after the prefix is the DOS command
+                dos_command = parts[1]
+                self.handle_dos_command(dos_command)
+                return
         
         # Check if statement ends with semicolon or comma
         ends_with_sep = args.rstrip().endswith(';') or args.rstrip().endswith(',')
