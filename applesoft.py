@@ -3086,6 +3086,15 @@ class ApplesoftInterpreter:
                 self.screen.blit(scaled, (0, 0))
             else:
                 self.screen.blit(self.gr_surface, (0, 0))
+            # Then composite text over bottom 4 lines (mixed mode)
+            if self.text_surface:
+                # Only blit the bottom 4 text rows (rows 20-23, pixels 320-383)
+                text_rect = pygame.Rect(0, 320, 560, 64)  # 4 rows * 16 pixels
+                if self.scale > 1:
+                    scaled_text = pygame.transform.scale(self.text_surface, (560 * self.scale, 384 * self.scale))
+                    self.screen.blit(scaled_text, (0, 320 * self.scale), pygame.Rect(0, 320 * self.scale, 560 * self.scale, 64 * self.scale))
+                else:
+                    self.screen.blit(self.text_surface, (0, 320), text_rect)
         elif self.graphics_mode in ['HGR', 'HGR2'] and self.hgr_surface:
             # Optionally apply a simple horizontal composite blur to reduce zebra artifacts
             if self.composite_blur:
