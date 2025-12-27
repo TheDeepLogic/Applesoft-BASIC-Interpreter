@@ -1,0 +1,4 @@
+10 HOME
+20 A$ = CHR$ (65)
+30 PRINT A$
+40 END

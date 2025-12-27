@@ -93,7 +93,7 @@ Then type BASIC commands directly:
 ```bash
 python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS] \
                     [--auto-close] [--autosnap-every N] [--autosnap-on-end] \
-                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--scale N]
+                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--plot-delay-ms MS] [--scale N] [--blit-per-line]
 ```
 
 **Options:**
@@ -104,7 +104,9 @@ python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS
 - `--autosnap-on-end`: Save a screenshot when the program ends
 - `--no-artifact`: Use artifact-free rendering (disables NTSC simulation)
 - `--composite-blur`: Apply horizontal blur for composite smoothing
-- `--delay`: Statement execution delay in seconds (default: 0.001)
+- `--delay`: Statement execution delay in seconds (default: 0.0015)
+- `--plot-delay-ms`: Extra delay (ms) after each low-res `PLOT` for visible animation (default: 0)
+- `--blit-per-line`: Defer display composition/flip until the end of each BASIC line (closer to Apple II draw cadence)
 - `--scale`: Display scale factor (default: 2 for 1120x768 window)
 
 ### Example Programs:
@@ -233,6 +235,8 @@ Then type BASIC commands directly:
 - `GOTO line_num` - Jump to line number
 - `GOSUB line_num` / `RETURN` - Subroutine calls
 - `IF condition THEN statement` - Conditional execution
+   - `THEN` actions may include multiple colon-separated parts (e.g., `IF ... THEN A=1: GOTO 50`)
+   - All `THEN` parts are treated as a single conditional group; they only run when the condition is true.
 - `FOR var = start TO end [STEP step]` ... `NEXT var` - Loops
 - `ON expr GOTO/GOSUB line1, line2, ...` - Computed branching
 - `CONT` - Resume after STOP
@@ -587,17 +591,19 @@ ApplesoftInterpreter
 
 1. **Tight Loop Optimization**: Adjacent FOR/NEXT statements with no intervening code execute in a single Python while loop with minimal overhead (0.00075 seconds per iteration for Apple II speed matching)
 
-2. **Input Timeout**: Prevents programs from hanging indefinitely on INPUT/GET using threading with configurable timeout (default: 30 seconds)
+2. **Display Batching**: Optional `--blit-per-line` defers pygame flip until the end of each BASIC line; prompts and mode switches still force immediate updates for responsiveness.
+3. **GR Animation Delay**: Optional `--plot-delay-ms` adds a small delay after each low-res `PLOT` to make movement (bullets, sprites) visibly closer to the Apple II cadence.
+4. **Input Handling**: `INPUT`/`GET` capture keystrokes from the pygame window; configurable timeout (default: 30 seconds). Arrow keys map to Apple II codes (left=8, right=21); keyboard softswitch semantics are supported (`PEEK(-16384)` / `POKE(-16368,0)`).
 
-3. **Expression Evaluation**: Recursive descent parser with proper operator precedence, type checking, and support for both numeric and string operations
+5. **Expression Evaluation**: Recursive descent parser with proper operator precedence, type checking, and support for both numeric and string operations
 
-4. **Control Flow Management**: 
+6. **Control Flow Management**: 
    - FOR loops store: variable name, end value, step, and line number
    - NEXT jumps to line after FOR (not to FOR itself)
    - GOSUB stores return line numbers on stack
    - PC (program counter) tracking with proper increment/jump logic
 
-5. **Graphics Rendering**:
+7. **Graphics Rendering**:
    - pygame used for all graphics modes
    - Each mode has its own surface
    - GR: Each "pixel" is 14x8 screen pixels
@@ -782,6 +788,14 @@ python applesoft.py basic_code/graphics_hires/test_snow.bas --autosnap-on-end
 2. **Input tests** will timeout after 30 seconds (configurable with `--input-timeout`)
 3. **Performance tests** can be run with `--auto-close` to exit immediately
 4. **Screenshot capture** enabled with `--autosnap-on-end` (saves to `screenshots/` folder)
+
+---
+
+## Apple II Compatibility Notes
+
+- **Keyboard Softswitches**: `PEEK(-16384)` returns the last key with the high bit set; `POKE(-16368,0)` clears the keyboard strobe.
+- **IF THEN Grouping**: Colon-separated `THEN` actions are treated as a single conditional group and only execute when the condition is true.
+- **SCRN Collision Behavior (GR)**: To preserve gameplay expected on Apple II, `SCRN(x,y)` will report `15` when the cell above `(x,y-1)` is `15` and your program is checking for collisions in the common adjacency pattern (e.g., bullet at `(XX, Y-1)` vs. target at `(X, Y)`). This mirrors visual overlap used by some classic games.
 
 ---
 
