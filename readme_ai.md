@@ -109,6 +109,7 @@ Example:
 | **String** | `LEN`, `LEFT$`, `RIGHT$`, `MID$`, `CHR$`, `STR$`, `VAL`, `ASC` |
 | **I/O** | `PEEK`, `POKE` (memory access), `SCRN` (read pixel) |
 | **Random** | `RND(X)` returns float [0,1); `RND(-1)` reseeds |
+| **System** | `USR(N)` returns 0 (stubbed; ML calls unsupported) |
 
 Examples:
 ```basic
@@ -235,6 +236,16 @@ Example:
 - `16384` (`$C000`): Keyboard input (7-bit ASCII + 128 if key available).
 - Interpreter provides sensible defaults for video memory; direct manipulation not required.
 
+### WAIT
+```basic
+100 WAIT  -16384, 128          :REM Wait until a key is pressed
+110 WAIT  16384, 128, 0        :REM Wait until no key is pending
+120 WAIT  $C000, 128, 128      :REM Hex address form; same as -16384
+```
+- Semantics: `WAIT addr, mask[, value]` blocks until `(PEEK(addr) AND mask)` equals `value`; if `value` is omitted, it blocks until the expression is non-zero.
+- Keyboard example: `PEEK(-16384)` has bit 7 set when a key is available; `WAIT -16384,128` waits for a key.
+- Behavior respects global `--exec-timeout`: if set and reached, `WAIT` stops waiting and execution continues.
+
 ---
 
 ## File Organization
@@ -310,6 +321,7 @@ python applesoft.py prog.bas > output.txt 2>&1
 
 ## Notes for AI Models
 - This interpreter is Applesoft-compatible but not 100% feature-complete; advanced features (machine language, disk I/O) are not supported.
+- `USR(N)` is recognized but stubbed to return `0`; programs that probe USR will not error but should not rely on machine-language routines.
 - Graphic demos may run at reduced speed in headless mode; use `--delay` to adjust statement execution rate.
 - HGR artifact color simulation (NTSC mode) is on by default; disable with `--no-artifact` if needed.
 - Always check interpreter output for `SYNTAX ERROR` or `RUNTIME ERROR` messages; they include line number and detail.

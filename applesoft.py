@@ -2405,9 +2405,65 @@ class ApplesoftInterpreter:
                 self.cmd_gosub(str(line))
                 
     def cmd_wait(self, args: str):
-        """WAIT command - wait for memory condition"""
-        # Not fully implemented - just add a small delay
-        time.sleep(0.1)
+        """WAIT command - wait for memory condition
+        Applesoft semantics: WAIT addr,mask[,value]
+        Blocks until (PEEK(addr) AND mask) == value. If value is omitted,
+        blocks until (PEEK(addr) AND mask) != 0.
+        """
+        args = args.strip()
+        if not args:
+            time.sleep(0.1)
+            return
+        parts = [p.strip() for p in args.split(',')]
+        if len(parts) < 2:
+            raise ApplesoftError("Syntax error in WAIT")
+        addr = int(self.evaluate(parts[0]))
+        mask = int(self.evaluate(parts[1])) & 0xFF
+        value = int(self.evaluate(parts[2])) & 0xFF if len(parts) > 2 else None
+
+        # Map negative addresses to 16-bit space like PEEK
+        if addr < 0:
+            addr = (addr + 65536) % 65536
+        addr = addr & 0xFFFF
+
+        start = time.time()
+        while True:
+            # Keep UI responsive while waiting
+            if PYGAME_AVAILABLE and pygame.display.get_init():
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.running = False
+                        return
+                    elif event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_LEFT:
+                            self.last_key_code = 8 | 0x80
+                        elif event.key == pygame.K_RIGHT:
+                            self.last_key_code = 21 | 0x80
+                        elif event.key == pygame.K_UP:
+                            self.last_key_code = 11 | 0x80
+                        elif event.key == pygame.K_DOWN:
+                            self.last_key_code = 10 | 0x80
+                        elif event.unicode and len(event.unicode) == 1:
+                            ascii_code = ord(event.unicode.upper())
+                            self.last_key_code = ascii_code | 0x80
+
+            # Read current byte via PEEK to honor softswitch behavior
+            byte_val = int(self.evaluate(f"PEEK({addr})")) & 0xFF
+            masked = byte_val & mask
+            if value is None:
+                if masked != 0:
+                    break
+            else:
+                if masked == value:
+                    break
+
+            # Respect overall execution timeout to avoid infinite wait
+            if self.execution_timeout is not None and self.execution_timeout > 0:
+                if (time.time() - start) > self.execution_timeout:
+                    # Fall through on timeout; mirrors interpreter-wide timeout
+                    break
+
+            time.sleep(0.01)
         
     def cmd_cont(self):
         """CONT command - continue execution after STOP"""
@@ -2985,6 +3041,10 @@ class ApplesoftInterpreter:
             if hi:
                 return 5.0 if is_odd else 6.0  # orange / blue indices
             return 1.0 if is_odd else 2.0      # green / purple indices
+        elif func_name == 'USR':
+            # Applesoft USR(n): call into user machine routine. Not supported; return 0.
+            # Provide stub to avoid Unknown function errors in programs that probe USR.
+            return 0.0
         else:
             raise ApplesoftError(f"Unknown function: {func_name}")
             
@@ -3041,7 +3101,7 @@ class ApplesoftInterpreter:
             s = str(self.evaluate(args[0]))
             start = int(self.evaluate(args[1])) - 1  # BASIC is 1-based
             if len(args) > 2:
-                length = int(self.evaluate(args[1]))
+                length = int(self.evaluate(args[2]))
                 return s[start:start + length]
             else:
                 return s[start:]
