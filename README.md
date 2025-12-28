@@ -642,7 +642,7 @@ All test BASIC programs are organized in the `basic_code/` folder by category:
 - **output/** - PRINT statement demos (1 file)
 - **system_memory/** - POKE/PEEK operations (10 files)
 - **text_and_io/** - Text input/output (3 files)
-- **mega_demo.bas** - Comprehensive demonstration program
+- **demo.bas** - Comprehensive demonstration program
 
 Total: 61 organized test files
 
