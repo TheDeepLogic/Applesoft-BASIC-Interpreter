@@ -1,31 +1,331 @@
 # AI Quickstart: Applesoft BASIC Interpreter
 
-This file is written for automated agents and tools. Keep outputs concise and fail fast. All commands assume repository root.
+Complete reference for automated agents integrating this Applesoft BASIC interpreter. Covers execution, language basics, graphics, and safe development patterns.
 
-## Launching programs
-- Interpreter entry: `python applesoft.py <program>`
-- If caller omits `.bas`, the interpreter will append `.bas` automatically when searching.
-- Graphics windows auto-close after 3 seconds by default. Override with:
-  - `--no-keep-open` (immediate close), `--auto-close` (close at end), `--close-delay <seconds>` (negative waits indefinitely).
-- Recommended test flags for automation: `--input-timeout 5 --exec-timeout 45 --auto-close --close-delay 0`.
+---
 
-## New sample: Blackjack
-- Path: `basic_code/games/blackjack.bas`
-- Features: title screen (HGR), betting, hit/stand/double, single split, dealer play, chip tracking starting at 100, celebration screen each time chips reach the next 100 milestone.
-- Run example: `python applesoft.py basic_code/games/blackjack.bas --input-timeout 5 --exec-timeout 120 --auto-close --close-delay 0`
-- Automate input: program uses blocking INPUT/GET. Provide scripted keypresses via tool wrapper if needed.
+## Overview
+- **Interpreter**: Pure Python implementation of Applesoft BASIC with HGR/GR graphics via pygame.
+- **Entry point**: `python applesoft.py <program> [flags]`
+- **Designed for**: AI model testing, code generation validation, and BASIC program development.
 
-## Batch test sweep (optional)
-- Helper script: `run_all_bas_tests.py`
-- Runs every `.bas` with `--input-timeout 5`, `--exec-timeout 45`, subprocess timeout 55s, `--auto-close`.
-- Generates `test_run_results.json` and logs; these are gitignored.
-- Invoke: `python run_all_bas_tests.py`
+---
 
-## File search hints
-- BASIC programs live under `basic_code/` (categorized by topic), plus `test_*.bas` for coverage.
-- Interpreter entry and CLI live in `applesoft.py` (bottom of file for argument parsing and path resolution).
+## Running Programs
 
-## Safety notes for agents
-- Do not edit existing BASIC tests unless required; add new programs instead.
-- Keep output windows short-lived in automation; prefer `--auto-close` and `--close-delay 0`.
-- If a path fails, the interpreter prints all attempted locations; ensure you pass relative paths from repo root.
+### Basic Invocation
+```bash
+python applesoft.py <path.bas>  # Run a BASIC program
+```
+If the filename omits `.bas`, the interpreter auto-appends it and searches:
+1. Current working directory
+2. `./basic_code/` subdirectory (organized by topic)
+3. Script's `basic_code/` directory
+
+### Essential Flags
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--input-timeout SECS` | 30 | Max wait for INPUT/GET (fail gracefully on timeout) |
+| `--exec-timeout SECS` | None | Max total program runtime (useful for infinite loops) |
+| `--auto-close` | False | Exit immediately when program ends (no window lingering) |
+| `--close-delay SECS` | 3.0 | Seconds to keep graphics window open after program ends; use negative for indefinite wait |
+| `--no-keep-open` | False | Close window immediately (overrides delay) |
+| `--scale N` | 2 | Display scale factor (1=280x192, 2=560x384 for HGR) |
+
+### Recommended Automation Flags
+For headless/CI testing without user interaction:
+```bash
+python applesoft.py program.bas --input-timeout 5 --exec-timeout 45 --auto-close --close-delay 0
+```
+
+### Batch Test Suite
+Helper script: `run_all_bas_tests.py`
+- Iterates all `.bas` files in repo with uniform timeouts
+- Generates `test_run_results.json` (gitignored) with rc, timing, and output per program
+- Invocation: `python run_all_bas_tests.py`
+
+---
+
+## Applesoft BASIC Language Primer
+
+### Syntax & Structure
+- **Line numbers required**: Each statement begins with a positive integer (line number).
+- **Multiple statements per line**: Separate with `:` (colon).
+- **Comments**: `REM <text>` ignores everything after REM on that line.
+- **Case-insensitive**: Commands, variables, and functions accept any case (e.g., `PRINT`, `print`, `Print`).
+
+Example:
+```basic
+100 PRINT "HELLO":REM First statement
+110 X = 5:PRINT X:REM Second statement on line 110
+```
+
+### Variables
+- **Naming**: Letters + digits; `$` suffix denotes string (e.g., `NAME$`, `X`, `VAL2`).
+- **Types**: Numeric (float) or string; implicit coercion in expressions.
+- **Scope**: Global only; no local variables.
+- **Arrays**: `DIM A(10), B$(5)` allocates space; 1-indexed by default.
+
+### Operators & Expressions
+- **Arithmetic**: `+`, `-`, `*`, `/`, `MOD` (modulo), `\` (integer division, Python-style).
+- **Comparison**: `=`, `<>`, `<`, `>`, `<=`, `>=`.
+- **Logical**: `AND`, `OR`, `NOT`.
+- **String**: `+` concatenates; `LEFT$`, `RIGHT$`, `MID$` extract substrings.
+- **Operator precedence**: Standard (unary, `*`/`/`/`MOD`/`\`, `+`/`-`, comparisons, logical).
+
+### Control Flow
+
+#### IF/THEN/ELSE
+```basic
+100 IF X > 5 THEN PRINT "BIG" ELSE PRINT "SMALL"
+```
+- Single-line only in this dialect; no multi-line IF blocks.
+
+#### FOR/NEXT Loops
+```basic
+100 FOR I = 1 TO 10 STEP 2
+110   PRINT I
+120 NEXT I
+```
+- Default `STEP` is 1; can step backward (negative STEP).
+- `NEXT` variable name is optional but recommended for clarity.
+
+#### GOTO / GOSUB
+```basic
+100 GOSUB 500        :REM Call subroutine at line 500
+110 END
+500 PRINT "SUBROUTINE":REM Subroutine code
+510 RETURN            :REM Return to caller
+```
+- `GOSUB`/`RETURN` pushes/pops return address; nesting allowed.
+- `GOTO` jumps unconditionally.
+
+### Built-in Functions
+
+| Category | Functions |
+|----------|-----------|
+| **Math** | `ABS`, `INT`, `SGN`, `SQR`, `EXP`, `LOG`, `SIN`, `COS`, `TAN`, `ATN`, `RND` |
+| **String** | `LEN`, `LEFT$`, `RIGHT$`, `MID$`, `CHR$`, `STR$`, `VAL`, `ASC` |
+| **I/O** | `PEEK`, `POKE` (memory access), `SCRN` (read pixel) |
+| **Random** | `RND(X)` returns float [0,1); `RND(-1)` reseeds |
+
+Examples:
+```basic
+100 X = INT(RND(1) * 100)     :REM Random 0-99
+110 Y$ = "HELLO"
+120 PRINT LEN(Y$)              :REM Output: 5
+130 PRINT MID$(Y$, 2, 3)       :REM Output: ELL
+```
+
+### Input & Output
+
+#### PRINT
+```basic
+100 PRINT "X="; X; " Y="; Y
+110 PRINT                       :REM Blank line
+```
+- Semicolon suppresses newline; comma tabs.
+
+#### INPUT / GET
+```basic
+100 INPUT "ENTER NAME: "; NAME$
+110 GET K$                      :REM Single char, no newline required
+```
+- `INPUT` waits for a full line + Enter.
+- `GET` waits for any single key (or timeout).
+- Both can timeout; set `--input-timeout` appropriately.
+
+---
+
+## Graphics Modes
+
+### Mode: TEXT (Default)
+- 40 columns × 24 rows of text.
+- Use `HOME` to clear and reset cursor.
+
+Example:
+```basic
+100 TEXT
+110 HOME
+120 PRINT "TEXT MODE"
+```
+
+### Mode: GR (Low-Res Graphics)
+- 40 × 48 pixels; 16 colors; 4 rows of text overlay (mixed mode).
+- Pixel values: 0–15 (color index).
+
+Key Commands:
+- `GR` — Enter GR mode.
+- `COLOR=N` — Set color for subsequent PLOT/HLIN/VLIN.
+- `PLOT X, Y` — Set pixel (X, Y) to current color.
+- `HLIN X1, X2 AT Y` — Horizontal line.
+- `VLIN Y1, Y2 AT X` — Vertical line.
+- `SCRN(X, Y)` — Read pixel color at (X, Y).
+
+Example:
+```basic
+100 GR
+110 COLOR = 5
+120 FOR I = 0 TO 39
+130   PLOT I, 20
+140 NEXT I
+150 TEXT
+```
+
+### Mode: HGR / HGR2 (High-Res Graphics)
+- 280 × 192 pixels; 6 colors (NTSC artifact mode); dual page support.
+- Efficient for game demos and complex graphics.
+
+Key Commands:
+- `HGR` — Page 1 (default).
+- `HGR2` — Page 2 (optional).
+- `HCOLOR=N` — Set color (0–7; actual color depends on artifact mode).
+- `HPLOT X, Y` — Plot pixel.
+- `HPLOT X1, Y1 TO X2, Y2` — Line draw.
+
+Example:
+```basic
+100 HGR
+110 HCOLOR = 3
+120 HPLOT 0, 0 TO 279, 191
+130 HTAB 5: VTAB 5: PRINT "HGR DEMO"
+140 GET K$
+150 HGR: TEXT
+```
+
+---
+
+## Data & Structures
+
+### Arrays
+```basic
+100 DIM A(100)                 :REM Numeric array, 1-indexed
+110 DIM NAME$(50)              :REM String array
+120 A(1) = 42
+130 PRINT A(1)
+```
+- Bounds: subscript range [1, size].
+- Multi-dimensional: `DIM M(10, 10)` allocates 10×10 grid.
+
+### DATA Statements & READ
+```basic
+100 DATA 10, 20, 30
+110 DATA 40, 50
+200 READ X, Y, Z
+210 PRINT X, Y, Z              :REM 10 20 30
+220 READ A, B
+230 PRINT A, B                 :REM 40 50
+```
+- `DATA` lines accumulate into a global pool.
+- `READ` consumes sequentially; `RESTORE` resets pointer to start.
+
+---
+
+## Memory & System
+
+### PEEK/POKE
+```basic
+100 V = PEEK(16384)            :REM Read from Apple II address space
+110 POKE 16384, 0              :REM Write value
+```
+- 64 KB address space; many locations map to special hardware.
+
+### Common Addresses (Soft-switches)
+- `16384` (`$C000`): Keyboard input (7-bit ASCII + 128 if key available).
+- Interpreter provides sensible defaults for video memory; direct manipulation not required.
+
+---
+
+## File Organization
+
+### Directory Structure
+```
+basic_code/
+  ├── arrays/           # Tests for array operations
+  ├── audio/            # SOUND/SPEAKER commands
+  ├── basics/           # Core language features
+  ├── control_flow/     # FOR, GOTO, GOSUB, etc.
+  ├── games/            # Game examples
+  ├── graphics_hires/   # HGR demos
+  ├── graphics_lores/   # GR demos
+  ├── math_random/      # Math functions, RND
+  ├── mixed/            # Combined features
+  ├── output/           # PRINT, formatting
+  ├── system_memory/    # PEEK, POKE, memory
+  └── text_and_io/      # INPUT, GET, text handling
+```
+
+### Test Conventions
+- `test_*.bas` files verify single features.
+- Short-running (<5s) for quick iteration.
+- Some long-runners (graphics, audio loops) hit `--exec-timeout` by design.
+
+---
+
+## Development Workflow for AI Agents
+
+### Creating New Programs
+1. **Choose location**: `basic_code/<category>/<name>.bas`
+2. **Start simple**: Test individual commands before combining.
+3. **Use clear logic**: Comments (`REM`) help other agents understand intent.
+4. **Test interactively**: Run with `--input-timeout 30 --close-delay -1` for manual testing.
+5. **Validate with automation**: Re-run with headless flags for CI.
+
+### Common Pitfalls
+- **Infinite loops**: Always set `--exec-timeout` when unsure.
+- **Blocking I/O**: `INPUT`/`GET` waits indefinitely unless timeout fires.
+- **Graphics initialization**: Call `GR` or `HGR` before graphics commands; call `TEXT` to exit.
+- **Variable initialization**: No implicit zero; use `X = 0` explicitly.
+- **String concatenation**: Use `+` operator; `PRINT` auto-stringifies numbers.
+
+### Debugging
+- **Syntax errors**: Interpreter reports line number; check command spelling and structure.
+- **Type mismatches**: Ensure numeric ops use numbers, string ops use strings.
+- **Array bounds**: Check DIM size; subscripts are 1-based and bounds-checked.
+- **Output inspection**: Capture STDOUT with shell redirect or pipe parser.
+
+---
+
+## Integration with External Tools
+
+### Piping Input
+```bash
+echo -e "10\nS\nn" | python applesoft.py blackjack.bas --input-timeout 5
+```
+- Each line becomes one INPUT or GET response.
+- Multiple inputs: separate with `\n`.
+
+### Capturing Output
+```bash
+python applesoft.py prog.bas > output.txt 2>&1
+```
+- Redirects STDOUT + STDERR for log analysis.
+
+### Structured Metadata
+- `test_run_results.json` contains per-file rc, duration, and full output.
+- Parse JSON to extract success/failure metrics.
+
+---
+
+## Notes for AI Models
+- This interpreter is Applesoft-compatible but not 100% feature-complete; advanced features (machine language, disk I/O) are not supported.
+- Graphic demos may run at reduced speed in headless mode; use `--delay` to adjust statement execution rate.
+- HGR artifact color simulation (NTSC mode) is on by default; disable with `--no-artifact` if needed.
+- Always check interpreter output for `SYNTAX ERROR` or `RUNTIME ERROR` messages; they include line number and detail.
+- For reproducible testing, seed RND explicitly: `RND(-1)` in line 1 of your program.
+
+---
+
+## File Paths & Quick Reference
+| Item | Path |
+|------|------|
+| Main interpreter | `applesoft.py` |
+| Batch test helper | `run_all_bas_tests.py` |
+| AI primer (this file) | `readme_ai.md` |
+| Example programs | `basic_code/<category>/*.bas` |
+| Main README | `README.md` |
+
+---
+
+Use this guide when developing, debugging, or integrating new BASIC programs. When in doubt, run a simpler test first to isolate issues.
