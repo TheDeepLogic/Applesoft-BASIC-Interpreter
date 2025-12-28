@@ -26,5 +26,12 @@ original_source/
 screenshots/
 ref/
 
+# Generated test artifacts
+test_run_results.json
+test_run_summary.log
+test_run_stdout.log
+test_run_stderr.log
+test_run_*.log
+
 # Keep BASIC test programs in repo (default: include all .bas)
 # No ignore rules for .bas files
