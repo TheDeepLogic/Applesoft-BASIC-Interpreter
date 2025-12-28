@@ -197,7 +197,46 @@ Example:
 
 ---
 
-## Sound
+
+## Sound Emulation and Music
+
+### Overview
+This interpreter supports both modern and classic Apple II sound routines:
+- **SOUND freq, duration**: Direct frequency/duration playback (cross-platform via pygame).
+- **CALL 768**: Emulates the Apple II ML sound routine from Sanders & Edge’s *Kids to Kids on the Apple Computer* (Datamost, 1984), loaded by `init_sound.bas` and used by programs like `play_charge.bas`.
+
+#### Historical Context
+- The ML routine in `init_sound.bas` is a direct transcription from the Sanders & Edge book, not Beagle Bros, aplay, or jsbasic.
+- On real Apple II hardware, run `init_sound.bas` first to load the ML routine, then run a program (e.g., `play_charge.bas`) to play music using `CALL 768`.
+- In this interpreter, the ML routine is emulated natively—no need to run `init_sound.bas` first.
+
+#### Implementation Details
+- Sound is generated using Python and pygame (cross-platform). On Windows, winsound is used for short tones if pygame is unavailable.
+- The interpreter uses exponential interpolation to match Apple II pitch tables for `CALL 768`, and direct frequency for `SOUND`.
+- All sound routines are documented and can be used in any BASIC program. See `basic_code/audio/init_sound.bas` and `basic_code/audio/play_charge.bas` for examples.
+
+#### Customization
+- Adjust the base frequency of all sound output using the command-line option:
+  ```bash
+  python applesoft.py program.bas --base-frequency MULTIPLIER
+  ```
+  For example, `--base-frequency 2.0` doubles all pitches (raises by one octave).
+
+#### Example Usage
+```basic
+REM Play a song using CALL 768
+POKE 0,63: POKE 1,40: CALL 768
+POKE 0,111: POKE 1,40: CALL 768
+POKE 0,141: POKE 1,40: CALL 768
+
+REM Play a note using SOUND
+SOUND 440, 500
+```
+
+#### Notes
+- The Mary Had a Little Lamb arrangement in `play_song.bas` has been improved by the user for better musicality.
+- All sound routines work identically in the interpreter and on real Apple II hardware/emulators (with ML routine loaded).
+
 
 ### SOUND Command
 Modern syntax for frequency/duration:

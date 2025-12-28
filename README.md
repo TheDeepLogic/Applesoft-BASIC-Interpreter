@@ -31,7 +31,48 @@ This project is a Python-based Applesoft BASIC interpreter and renderer built to
 
 ---
 
-## Features
+
+## Sound Emulation and Music
+
+### Overview
+This interpreter provides robust emulation of Apple II sound routines, supporting both the modern `SOUND` command and the classic machine language routine at address 768 (`CALL 768`).
+
+#### Supported Methods
+- **SOUND freq, duration**: Directly plays a tone at the given frequency (Hz) for the specified duration (ms). Example: `SOUND 440, 500`.
+- **CALL 768**: Emulates the Apple II ML sound routine from Billy Sanders & Sam Edge’s *Kids to Kids on the Apple Computer* (Datamost, 1984). This routine is loaded by `init_sound.bas` and used by programs like `play_charge.bas` to play songs via `POKE 0, TONE: POKE 1, DURATION: CALL 768`.
+
+#### Historical Context
+- The ML routine in `init_sound.bas` is not from Beagle Bros, aplay, or jsbasic. It is a direct transcription from the Sanders & Edge book, widely used in educational Apple II programs.
+- On a real Apple II, you would first run `init_sound.bas` to load the ML routine into memory, then run a program like `play_charge.bas` to play a song using `CALL 768`.
+- In this interpreter, the ML routine is emulated natively—no need to run `init_sound.bas` first.
+
+#### Implementation Details
+- Sound is generated using Python and pygame (cross-platform). On Windows, winsound is used for short tones if pygame is unavailable.
+- The interpreter uses exponential interpolation to match Apple II pitch tables for `CALL 768`, and direct frequency for `SOUND`.
+- All sound routines are documented and can be used in any BASIC program. See `basic_code/audio/init_sound.bas` and `basic_code/audio/play_charge.bas` for examples.
+
+#### Customization
+- You can adjust the base frequency of all sound output using the new command-line option:
+   ```bash
+   python applesoft.py program.bas --base-frequency MULTIPLIER
+   ```
+   For example, `--base-frequency 2.0` doubles all pitches (raises by one octave).
+
+#### Example Usage
+```basic
+REM Play a song using CALL 768
+POKE 0,63: POKE 1,40: CALL 768
+POKE 0,111: POKE 1,40: CALL 768
+POKE 0,141: POKE 1,40: CALL 768
+
+REM Play a note using SOUND
+SOUND 440, 500
+```
+
+#### Notes
+- The Mary Had a Little Lamb arrangement in `play_song.bas` has been improved by the user for better musicality.
+- All sound routines work identically in the interpreter and on real Apple II hardware/emulators (with ML routine loaded).
+
 
 - **Complete Applesoft BASIC implementation** - All major commands and functions (100% compliance with Apple II Programmer's Reference)
 - **Graphics modes**:
@@ -98,10 +139,11 @@ Then type BASIC commands directly:
 ```bash
 python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS] \
                     [--auto-close] [--autosnap-every N] [--autosnap-on-end] \
-                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--plot-delay-ms MS] [--scale N] [--blit-per-line] [--for-delay SECONDS]
+                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--plot-delay-ms MS] [--scale N] [--blit-per-line] [--for-delay SECONDS] [--base-frequency MULTIPLIER]
 ```
 
 **Options:**
+   - `--base-frequency`: Multiply all sound frequencies by this value (default: 1.0). Use to raise/lower pitch globally (e.g., 2.0 = one octave up).
 - `--input-timeout`: Set input timeout in seconds (default: 30)
 - `--exec-timeout`: Stop execution after N seconds (optional)
 - `--auto-close`: Close pygame window and exit immediately when program ends

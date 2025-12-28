@@ -2173,10 +2173,8 @@ class ApplesoftInterpreter:
         if addr == 768:
             tone_val = int(self.memory[0]) & 0xFF
             duration_val = int(self.memory[1]) & 0xFF
-            
-            # Convert Apple II tone value to frequency using the note chart from the book
-            # Tone values map to musical notes with exponential relationship
-            # Key reference points from the book's note chart:
+
+            # Universal Apple II tone-to-frequency mapping (no special cases)
             tone_to_freq = {
                 63: 261.63,   # Middle C (C4)
                 82: 293.66,   # D4
@@ -2197,47 +2195,32 @@ class ApplesoftInterpreter:
             if tone_val in tone_to_freq:
                 frequency = int(tone_to_freq[tone_val])
             elif tone_val > 0:
-                # Find the two nearest known tones and interpolate exponentially
                 sorted_tones = sorted(tone_to_freq.keys())
                 if tone_val < sorted_tones[0]:
-                    # Extrapolate below using first two points
                     t1, t2 = sorted_tones[0], sorted_tones[1]
                     f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
                     ratio = (f2 / f1) ** (1.0 / (t2 - t1))
                     frequency = int(f1 * (ratio ** (tone_val - t1)))
                 elif tone_val > sorted_tones[-1]:
-                    # Extrapolate above using last two points
                     t1, t2 = sorted_tones[-2], sorted_tones[-1]
                     f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
                     ratio = (f2 / f1) ** (1.0 / (t2 - t1))
                     frequency = int(f2 * (ratio ** (tone_val - t2)))
                 else:
-                    # Interpolate between two known points
                     for i in range(len(sorted_tones) - 1):
                         if sorted_tones[i] < tone_val < sorted_tones[i + 1]:
                             t1, t2 = sorted_tones[i], sorted_tones[i + 1]
                             f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
-                            # Exponential interpolation
                             ratio = (f2 / f1) ** (1.0 / (t2 - t1))
                             frequency = int(f1 * (ratio ** (tone_val - t1)))
                             break
                 frequency = max(40, min(4000, frequency))
             else:
-                frequency = 440  # Default if tone is 0
+                frequency = 440
 
-
-            # Raise by a full octave (multiply by 2.0)
-            frequency = min(4000, int(frequency * 2.0))
-
-            # Special case: lower the final held note (tone 159, duration 255) by one octave (so it is at original pitch)
-            if tone_val == 159 and duration_val == 255:
-                frequency = max(20, frequency // 2)
-
-            # Convert duration value (1-255) to milliseconds
-            # Apple II duration is in timing loops; scale appropriately (5ms per unit)
+            # Convert duration value (1-255) to milliseconds (Apple II timing loop estimate)
             duration_ms = duration_val * 5
 
-            # Play the tone using existing sound infrastructure
             self._play_tone(frequency, duration_ms)
             return
         
@@ -2362,6 +2345,10 @@ class ApplesoftInterpreter:
         volume = 0.5
         if len(parts) >= 3:
             volume = float(self.evaluate(parts[2]))
+
+        # Raise all notes by one octave (multiply frequency by 2)
+        freq = freq * 2.0
+
         self._play_tone(freq, duration_ms, volume)
 
     def _play_tone(self, freq_hz: float, duration_ms: float, volume: float = 0.5):
@@ -2370,18 +2357,6 @@ class ApplesoftInterpreter:
             return
         volume = max(0.0, min(1.0, volume))
         
-        # Use pygame.mixer for long durations to avoid winsound gaps
-        # Short durations use winsound for lower latency
-        use_pygame_for_long = duration_ms > 500
-        
-        if not use_pygame_for_long:
-            try:
-                if WINSOUND_AVAILABLE and os.name == 'nt':
-                    winsound.Beep(int(freq_hz), int(duration_ms))
-                    return
-            except Exception:
-                pass
-
         if not PYGAME_AVAILABLE:
             # Fallback: approximate with repeated clicks
             cycles = int((duration_ms / 1000.0) * 10)
@@ -2400,10 +2375,9 @@ class ApplesoftInterpreter:
             import array, math as _math
             amp = int(30000 * volume)
             samples = array.array('h')
-            two_pi_f = 2 * _math.pi * freq_hz
             for n in range(total_samples):
                 t = n / sample_rate
-                val = int(amp * _math.sin(two_pi_f * t))
+                val = int(amp * _math.sin(2 * _math.pi * freq_hz * t))
                 samples.append(val)
             snd_bytes = samples.tobytes()
             tone = pygame.mixer.Sound(buffer=snd_bytes)
