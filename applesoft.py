@@ -85,8 +85,8 @@ class ApplesoftInterpreter:
     
     def __init__(self, input_timeout: float = 30.0, execution_timeout: float = None, keep_window_open: bool = True,
                  autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
-                 composite_blur: bool = False, statement_delay: float = 0.0015, auto_close: bool = False, scale: int = 2,
-                 gr_plot_delay_ms: int = 0, blit_per_line: bool = False):
+                 composite_blur: bool = False, statement_delay: float = 0.0015, auto_close: bool = False,
+                 window_close_delay: Optional[float] = 5.0, scale: int = 2, gr_plot_delay_ms: int = 0, blit_per_line: bool = False):
         """Initialize the interpreter
         
         Args:
@@ -98,6 +98,8 @@ class ApplesoftInterpreter:
             artifact_mode: Simulate Apple II NTSC artifact color rules (default: True)
             composite_blur: Apply composite horizontal blur effect (default: False)
             statement_delay: Delay in seconds after each statement to simulate Apple II speed (default: 0.0015)
+            window_close_delay: Seconds to keep the window open after program end when not auto-closing.
+                Use None to wait indefinitely for manual close; 0 for immediate close; default: 5 seconds.
             gr_plot_delay_ms: Extra delay in milliseconds after each low-res PLOT to make animations visible (default: 0)
             blit_per_line: When true, defer display flip until the end of each BASIC line (default: False)
             scale: Display scale factor for pygame window (default: 2)
@@ -111,6 +113,7 @@ class ApplesoftInterpreter:
         self.composite_blur = composite_blur
         self.statement_delay = statement_delay
         self.auto_close = auto_close
+        self.window_close_delay = window_close_delay if window_close_delay is None else max(0.0, float(window_close_delay))
         self.scale = max(1, scale)  # Minimum scale of 1
         # Graphics animation delay (low-res PLOT)
         self.gr_plot_delay_ms = max(0, int(gr_plot_delay_ms))
@@ -446,14 +449,26 @@ class ApplesoftInterpreter:
                 self.save_screenshot('final')
             except Exception:
                 pass
-        # Keep pygame window open until user closes it (if enabled and not auto_close)
+        # Keep pygame window open briefly (or indefinitely) unless auto-close was requested
         if self.keep_window_open and not self.auto_close and PYGAME_AVAILABLE and pygame.display.get_init():
-            print("\nProgram ended. Close the window to exit.")
-            while True:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        return
-                time.sleep(0.05)  # Reduce CPU usage while waiting
+            if self.window_close_delay is None:
+                print("\nProgram ended. Close the window to exit.")
+                while True:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            return
+                    time.sleep(0.05)  # Reduce CPU usage while waiting
+            elif self.window_close_delay == 0:
+                pygame.event.pump()  # allow immediate event handling/cleanup
+                return
+            else:
+                print(f"\nProgram ended. Window will close in {self.window_close_delay:.0f} seconds (use --no-keep-open to close immediately).")
+                end_time = time.time() + self.window_close_delay
+                while time.time() < end_time:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            return
+                    time.sleep(0.05)
             
     def get_current_line(self) -> int:
         """Get the current line number"""
@@ -3189,6 +3204,8 @@ def main():
                        help='Extra delay in milliseconds after each low-res PLOT for visible animation (default: 0)')
     parser.add_argument('--auto-close', action='store_true',
                        help='Automatically close pygame window and exit when program ends (useful for testing)')
+    parser.add_argument('--close-delay', type=float, default=5.0,
+                       help='Seconds to keep the window open after program ends (default: 5). Use 0 for immediate close; negative to wait indefinitely.')
     parser.add_argument('--scale', type=int, default=2,
                        help='Display scale factor (default: 2 for 1120x768 window)')
     parser.add_argument('--blit-per-line', action='store_true',
@@ -3207,6 +3224,7 @@ def main():
         statement_delay=args.delay,
         gr_plot_delay_ms=args.plot_delay_ms,
         auto_close=args.auto_close,
+        window_close_delay=None if args.close_delay is not None and args.close_delay < 0 else args.close_delay,
         scale=args.scale,
         blit_per_line=args.blit_per_line
     )
