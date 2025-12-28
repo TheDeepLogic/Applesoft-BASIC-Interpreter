@@ -3133,28 +3133,31 @@ class ApplesoftInterpreter:
 
 
 def resolve_program_path(name: str) -> Optional[str]:
-    """Resolve a program path, searching common locations.
-
-    Order of preference:
-    1. Explicit absolute path
-    2. Provided relative path from CWD
-    3. CWD/basic_code/<name>
-    4. <script_dir>/basic_code/<name>
-    """
+    """Resolve a program path, searching common locations and inferring .bas extension."""
     if not name:
         return None
-    if os.path.isabs(name):
-        return name if os.path.isfile(name) else None
 
-    candidates = [
-        os.path.join(os.getcwd(), name),
-        os.path.join(os.getcwd(), 'basic_code', name),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'basic_code', name),
-    ]
+    # Try both the provided name and a .bas-suffixed variant when no extension was given.
+    variants = [name]
+    root, ext = os.path.splitext(name)
+    if not ext:
+        variants.append(f"{name}.bas")
 
-    for cand in candidates:
-        if os.path.isfile(cand):
-            return cand
+    for variant in variants:
+        if os.path.isabs(variant):
+            if os.path.isfile(variant):
+                return variant
+            continue
+
+        candidates = [
+            os.path.join(os.getcwd(), variant),
+            os.path.join(os.getcwd(), 'basic_code', variant),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'basic_code', variant),
+        ]
+
+        for cand in candidates:
+            if os.path.isfile(cand):
+                return cand
     return None
 
 
@@ -3213,13 +3216,15 @@ def main():
         try:
             program_path = resolve_program_path(args.filename)
             if not program_path:
-                searched = [
-                    os.path.join(os.getcwd(), args.filename),
-                    os.path.join(os.getcwd(), 'basic_code', args.filename),
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'basic_code', args.filename),
-                ]
+                attempted = []
+                for variant in ([args.filename] if os.path.splitext(args.filename)[1] else [args.filename, f"{args.filename}.bas"]):
+                    attempted.extend([
+                        os.path.join(os.getcwd(), variant),
+                        os.path.join(os.getcwd(), 'basic_code', variant),
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'basic_code', variant),
+                    ])
                 print("Error: File not found. Tried:")
-                for path in searched:
+                for path in attempted:
                     print(f"  {path}")
                 sys.exit(1)
             interp.load_program(program_path)
