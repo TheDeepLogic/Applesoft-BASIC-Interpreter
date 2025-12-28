@@ -2505,8 +2505,8 @@ class ApplesoftInterpreter:
             
     def cmd_pop(self):
         """POP command - remove top of GOSUB return stack"""
-        if self.return_stack:
-            self.return_stack.pop()
+        if self.gosub_stack:
+            self.gosub_stack.pop()
         else:
             raise ApplesoftError("Stack overflow")
             
@@ -2988,17 +2988,17 @@ class ApplesoftInterpreter:
             # Address 218-219 - error line number (2-byte little-endian)
             elif addr == 218:
                 # Low byte of error line
-                line = self.current_line if self.last_error else 0
+                line = getattr(self, 'last_error_line', 0) if self.last_error else 0
                 return float(line & 0xFF)
             elif addr == 219:
                 # High byte of error line
-                line = self.current_line if self.last_error else 0
+                line = getattr(self, 'last_error_line', 0) if self.last_error else 0
                 return float((line >> 8) & 0xFF)
             
             # Address 222 - error code
             elif addr == 222:
-                # TODO: Map last_error to error codes (see Appendix E)
-                return 0
+                # Return simple non-zero error code when an error is active
+                return float(getattr(self, 'last_error_code', 0) if self.last_error else 0)
             
             # Update cursor position from memory if accessed
             if addr == 36:  # Cursor X
