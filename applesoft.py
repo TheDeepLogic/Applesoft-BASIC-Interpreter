@@ -86,7 +86,7 @@ class ApplesoftInterpreter:
     def __init__(self, input_timeout: float = 30.0, execution_timeout: float = None, keep_window_open: bool = True,
                  autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
                  composite_blur: bool = False, statement_delay: float = 0.0015, auto_close: bool = False,
-                 window_close_delay: Optional[float] = 5.0, scale: int = 2, gr_plot_delay_ms: int = 0, blit_per_line: bool = False):
+                 window_close_delay: Optional[float] = 3.0, scale: int = 2, gr_plot_delay_ms: int = 0, blit_per_line: bool = False):
         """Initialize the interpreter
         
         Args:
@@ -99,7 +99,7 @@ class ApplesoftInterpreter:
             composite_blur: Apply composite horizontal blur effect (default: False)
             statement_delay: Delay in seconds after each statement to simulate Apple II speed (default: 0.0015)
             window_close_delay: Seconds to keep the window open after program end when not auto-closing.
-                Use None to wait indefinitely for manual close; 0 for immediate close; default: 5 seconds.
+                Use None to wait indefinitely for manual close; 0 for immediate close; default: 3 seconds.
             gr_plot_delay_ms: Extra delay in milliseconds after each low-res PLOT to make animations visible (default: 0)
             blit_per_line: When true, defer display flip until the end of each BASIC line (default: False)
             scale: Display scale factor for pygame window (default: 2)
@@ -3204,8 +3204,8 @@ def main():
                        help='Extra delay in milliseconds after each low-res PLOT for visible animation (default: 0)')
     parser.add_argument('--auto-close', action='store_true',
                        help='Automatically close pygame window and exit when program ends (useful for testing)')
-    parser.add_argument('--close-delay', type=float, default=5.0,
-                       help='Seconds to keep the window open after program ends (default: 5). Use 0 for immediate close; negative to wait indefinitely.')
+    parser.add_argument('--close-delay', type=float, default=3.0,
+                       help='Seconds to keep the window open after program ends (default: 3). Use 0 for immediate close; negative to wait indefinitely.')
     parser.add_argument('--scale', type=int, default=2,
                        help='Display scale factor (default: 2 for 1120x768 window)')
     parser.add_argument('--blit-per-line', action='store_true',
