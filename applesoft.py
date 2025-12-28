@@ -86,7 +86,8 @@ class ApplesoftInterpreter:
     def __init__(self, input_timeout: float = 30.0, execution_timeout: float = None, keep_window_open: bool = True,
                  autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
                  composite_blur: bool = False, statement_delay: float = 0.0015, auto_close: bool = False,
-                 window_close_delay: Optional[float] = 3.0, scale: int = 2, gr_plot_delay_ms: int = 0, blit_per_line: bool = False):
+                 window_close_delay: Optional[float] = 3.0, scale: int = 2, gr_plot_delay_ms: int = 0, blit_per_line: bool = False,
+                 for_delay: Optional[float] = None):
         """Initialize the interpreter
         
         Args:
@@ -117,6 +118,8 @@ class ApplesoftInterpreter:
         self.scale = max(1, scale)  # Minimum scale of 1
         # Graphics animation delay (low-res PLOT)
         self.gr_plot_delay_ms = max(0, int(gr_plot_delay_ms))
+        # FOR/NEXT tight loop delay (user-tunable)
+        self.for_delay = for_delay if for_delay is not None else 0.00013
         # Optional batched display flips per BASIC line
         self.blit_per_line = bool(blit_per_line)
         self._dirty_display = False
@@ -1089,8 +1092,8 @@ class ApplesoftInterpreter:
             step_val = loop['step']
             
             # Add delay to match real Apple II speed (~40 seconds for 30,000 iterations)
-            # Calibrated delay: 0.00075 seconds per iteration
-            loop_delay = 0.00075
+            # User-tunable delay for tight FOR/NEXT loops
+            loop_delay = self.for_delay
             
             # Execute remaining iterations without going through interpreter
             while True:
@@ -2164,6 +2167,80 @@ class ApplesoftInterpreter:
         """CALL command - handle Apple II monitor subroutines"""
         addr = int(self.evaluate(args.strip()))
         
+        # CALL 768: Apple II sound routine
+        # Reads TONE from memory location 0 (1-255) and DURATION from location 1 (1-255)
+        # This emulates the machine language sound routine loaded at address 768
+        if addr == 768:
+            tone_val = int(self.memory[0]) & 0xFF
+            duration_val = int(self.memory[1]) & 0xFF
+            
+            # Convert Apple II tone value to frequency using the note chart from the book
+            # Tone values map to musical notes with exponential relationship
+            # Key reference points from the book's note chart:
+            tone_to_freq = {
+                63: 261.63,   # Middle C (C4)
+                82: 293.66,   # D4
+                103: 329.63,  # E4
+                111: 349.23,  # F4
+                124: 392.00,  # G4
+                138: 440.00,  # A4
+                151: 493.88,  # B4
+                158: 523.25,  # C5
+                167: 587.33,  # D5
+                177: 659.25,  # E5
+                182: 698.46,  # F5
+                190: 783.99,  # G5
+                198: 880.00,  # A5
+                203: 987.77   # B5
+            }
+
+            if tone_val in tone_to_freq:
+                frequency = int(tone_to_freq[tone_val])
+            elif tone_val > 0:
+                # Find the two nearest known tones and interpolate exponentially
+                sorted_tones = sorted(tone_to_freq.keys())
+                if tone_val < sorted_tones[0]:
+                    # Extrapolate below using first two points
+                    t1, t2 = sorted_tones[0], sorted_tones[1]
+                    f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
+                    ratio = (f2 / f1) ** (1.0 / (t2 - t1))
+                    frequency = int(f1 * (ratio ** (tone_val - t1)))
+                elif tone_val > sorted_tones[-1]:
+                    # Extrapolate above using last two points
+                    t1, t2 = sorted_tones[-2], sorted_tones[-1]
+                    f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
+                    ratio = (f2 / f1) ** (1.0 / (t2 - t1))
+                    frequency = int(f2 * (ratio ** (tone_val - t2)))
+                else:
+                    # Interpolate between two known points
+                    for i in range(len(sorted_tones) - 1):
+                        if sorted_tones[i] < tone_val < sorted_tones[i + 1]:
+                            t1, t2 = sorted_tones[i], sorted_tones[i + 1]
+                            f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
+                            # Exponential interpolation
+                            ratio = (f2 / f1) ** (1.0 / (t2 - t1))
+                            frequency = int(f1 * (ratio ** (tone_val - t1)))
+                            break
+                frequency = max(40, min(4000, frequency))
+            else:
+                frequency = 440  # Default if tone is 0
+
+
+            # Raise by a full octave (multiply by 2.0)
+            frequency = min(4000, int(frequency * 2.0))
+
+            # Special case: lower the final held note (tone 159, duration 255) by one octave (so it is at original pitch)
+            if tone_val == 159 and duration_val == 255:
+                frequency = max(20, frequency // 2)
+
+            # Convert duration value (1-255) to milliseconds
+            # Apple II duration is in timing loops; scale appropriately (5ms per unit)
+            duration_ms = duration_val * 5
+
+            # Play the tone using existing sound infrastructure
+            self._play_tone(frequency, duration_ms)
+            return
+        
         # Handle common Apple II ROM routines
         if addr == 62454 or addr == 0xF3F6:
             # HGR screen fill with current HCOLOR
@@ -2292,12 +2369,18 @@ class ApplesoftInterpreter:
         if duration_ms <= 0 or freq_hz <= 0:
             return
         volume = max(0.0, min(1.0, volume))
-        try:
-            if WINSOUND_AVAILABLE and os.name == 'nt':
-                winsound.Beep(int(freq_hz), int(duration_ms))
-                return
-        except Exception:
-            pass
+        
+        # Use pygame.mixer for long durations to avoid winsound gaps
+        # Short durations use winsound for lower latency
+        use_pygame_for_long = duration_ms > 500
+        
+        if not use_pygame_for_long:
+            try:
+                if WINSOUND_AVAILABLE and os.name == 'nt':
+                    winsound.Beep(int(freq_hz), int(duration_ms))
+                    return
+            except Exception:
+                pass
 
         if not PYGAME_AVAILABLE:
             # Fallback: approximate with repeated clicks
@@ -2309,7 +2392,7 @@ class ApplesoftInterpreter:
         try:
             # Ensure mixer and build a sine buffer for the given tone
             if not self._mixer_ready:
-                pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=256)
+                pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
                 self._mixer_ready = True
             sample_rate = 44100
             duration_sec = duration_ms / 1000.0
@@ -3268,6 +3351,8 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Applesoft BASIC Interpreter')
+    parser.add_argument('--for-delay', type=float, default=None,
+                       help='Delay in seconds per iteration for tight FOR/NEXT loops (default: 0.00013)')
     parser.add_argument('filename', nargs='?', help='BASIC program file to load')
     parser.add_argument('--input-timeout', type=float, default=30.0,
                        help='Input timeout in seconds (default: 30)')
@@ -3313,7 +3398,8 @@ def main():
         auto_close=args.auto_close,
         window_close_delay=None if args.close_delay is not None and args.close_delay < 0 else args.close_delay,
         scale=args.scale,
-        blit_per_line=args.blit_per_line
+        blit_per_line=args.blit_per_line,
+        for_delay=args.for_delay
     )
     
     if args.filename:

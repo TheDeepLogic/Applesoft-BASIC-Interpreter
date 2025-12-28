@@ -197,6 +197,38 @@ Example:
 
 ---
 
+## Sound
+
+### SOUND Command
+Modern syntax for frequency/duration:
+```basic
+100 SOUND 440, 500      :REM Play 440 Hz for 500 ms
+110 SOUND 523, 250      :REM Play 523 Hz (C note) for 250 ms
+```
+
+### Apple II Machine Language Sound Routine (CALL 768)
+Classic Apple II programs often use a machine language routine at address 768:
+```basic
+100 POKE 0, 100         :REM Tone value (1-255, lower = higher pitch)
+110 POKE 1, 50          :REM Duration (1-255, in timing loops)
+120 CALL 768            :REM Play the tone
+```
+- **Memory location 0**: Tone value (1-255). Lower values = higher frequencies.
+- **Memory location 1**: Duration value (1-255). Higher = longer duration.
+- **CALL 768**: Executes the sound routine using the POKE'd values.
+- The interpreter emulates this Apple II convention without requiring the init_sound.bas loader.
+
+Example tune:
+```basic
+10 POKE 0,63: POKE 1,40: CALL 768    :REM First note
+20 POKE 0,111: POKE 1,40: CALL 768   :REM Second note
+30 POKE 0,141: POKE 1,40: CALL 768   :REM Third note
+```
+
+Both methods produce audio on systems with sound support (Windows/pygame).
+
+---
+
 ## Data & Structures
 
 ### Arrays

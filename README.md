@@ -94,10 +94,11 @@ Then type BASIC commands directly:
 
 ### Command-line options:
 
+
 ```bash
 python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS] \
                     [--auto-close] [--autosnap-every N] [--autosnap-on-end] \
-                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--plot-delay-ms MS] [--scale N] [--blit-per-line]
+                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--plot-delay-ms MS] [--scale N] [--blit-per-line] [--for-delay SECONDS]
 ```
 
 **Options:**
@@ -112,6 +113,8 @@ python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS
 - `--plot-delay-ms`: Extra delay (ms) after each low-res `PLOT` for visible animation (default: 0)
 - `--blit-per-line`: Defer display composition/flip until the end of each BASIC line (closer to Apple II draw cadence)
 - `--scale`: Display scale factor (default: 2 for 1120x768 window)
+
+- `--for-delay`: Set the delay in seconds per iteration for tight FOR/NEXT loops (default: 0.00013). Use this to fine-tune timing for programs that use delay loops, e.g. `FOR I = 1 TO D: NEXT I`.
 
 ### Example Programs:
 
@@ -593,7 +596,7 @@ ApplesoftInterpreter
 
 ### Key Implementation Patterns
 
-1. **Tight Loop Optimization**: Adjacent FOR/NEXT statements with no intervening code execute in a single Python while loop with minimal overhead (0.00075 seconds per iteration for Apple II speed matching)
+1. **Tight Loop Optimization**: Adjacent FOR/NEXT statements with no intervening code execute in a single Python while loop with minimal overhead. The per-iteration delay is user-tunable via `--for-delay` (default: 0.00013 seconds) for Apple II speed matching.
 
 2. **Display Batching**: Optional `--blit-per-line` defers pygame flip until the end of each BASIC line; prompts and mode switches still force immediate updates for responsiveness.
 3. **GR Animation Delay**: Optional `--plot-delay-ms` adds a small delay after each low-res `PLOT` to make movement (bullets, sprites) visibly closer to the Apple II cadence.
