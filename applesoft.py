@@ -404,14 +404,22 @@ class ApplesoftInterpreter:
                                 pass
                     except ApplesoftError as e:
                         if self.error_handler_line:
-                            self.pc = self.error_handler_line
+                            # Record error details for PEEK and RESUME
                             self.last_error = str(e)
+                            self.last_error_line = self.current_line
+                            # Generic non-zero error code
+                            self.last_error_code = 1
+                            self.pc = self.error_handler_line
                             continue
                         else:
                             # Apple-like message plus detail
                             error_msg = f"SYNTAX ERROR IN {self.current_line}" if self.current_line else "SYNTAX ERROR"
                             detail_msg = f"Detail: {e}"
                             
+                            # Record error details
+                            self.last_error = str(e)
+                            self.last_error_line = self.current_line
+                            self.last_error_code = 1
                             # Print to console
                             print(error_msg)
                             print(detail_msg)
@@ -696,7 +704,7 @@ class ApplesoftInterpreter:
         elif cmd == 'ONERR':
             self.cmd_onerr(args)
         elif cmd == 'RESUME':
-            self.cmd_resume()
+            self.cmd_resume(args)
         elif cmd == 'ON':
             self.cmd_on(args)
         elif cmd == 'WAIT':
@@ -2034,11 +2042,11 @@ class ApplesoftInterpreter:
         
         # SPEED (241)
         elif addr == 241:
-            pass  # 256-SPEED, used for display refresh rate
+             line = getattr(self, 'last_error_line', 0) if self.last_error else 0
         
-        # Graphics mode softswitches (Apple II memory-mapped I/O at $C0xx)
+             line = getattr(self, 'last_error_line', 0) if self.last_error else 0
         # These are typically accessed via addresses 49152-49407 ($C000-$C0FF)
-        
+             return float(getattr(self, 'last_error_code', 0) if self.last_error else 0)
         # $C050: TEXT mode (off=graphics)
         elif addr == 49232 or addr == ((-16304 + 65536) % 65536):
             self.graphics_mode = 'TEXT'
@@ -2375,13 +2383,32 @@ class ApplesoftInterpreter:
             line = int(args[5:].strip())
             self.error_handler_line = line
             
-    def cmd_resume(self):
-        """RESUME command - resume after error"""
-        if self.last_error:
-            self.last_error = None
-            # Continue from current line
-        else:
+    def cmd_resume(self, args: str = ""):
+        """RESUME command - resume after error
+        RESUME [line]
+        If a line is provided, branch to it. Otherwise resume at the line
+        following the one that caused the error.
+        """
+        if not self.last_error:
             raise ApplesoftError("Can't resume")
+        target_line = None
+        args = (args or "").strip()
+        if args:
+            try:
+                target_line = int(self.evaluate(args))
+            except Exception:
+                raise ApplesoftError("Syntax error in RESUME")
+        else:
+            # Default resume to next line after the error line
+            err_line = getattr(self, 'last_error_line', None)
+            if err_line is not None:
+                target_line = self.get_next_line(err_line)
+        # Clear error
+        self.last_error = None
+        # Jump if target known
+        if target_line is not None:
+            self.pc = target_line
+            self.pc_changed = True
             
     def cmd_on(self, args: str):
         """ON command - computed GOTO/GOSUB"""
