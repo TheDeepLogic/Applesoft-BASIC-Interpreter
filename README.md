@@ -41,8 +41,7 @@ This interpreter provides robust emulation of Apple II sound routines, supportin
 - **SOUND freq, duration**: Directly plays a tone at the given frequency (Hz) for the specified duration (ms). Example: `SOUND 440, 500`.
 - **CALL 768**: Emulates the Apple II ML sound routine from Billy Sanders & Sam Edge’s *Kids to Kids on the Apple Computer* (Datamost, 1984). This routine is loaded by `init_sound.bas` and used by programs like `play_charge.bas` to play songs via `POKE 0, TONE: POKE 1, DURATION: CALL 768`.
 
-#### Historical Context
-- The ML routine in `init_sound.bas` is not from Beagle Bros, aplay, or jsbasic. It is a direct transcription from the Sanders & Edge book, widely used in educational Apple II programs.
+- The ML routine in `init_sound.bas` is a direct transcription from the Sanders & Edge book, widely used in educational Apple II programs.
 - On a real Apple II, you would first run `init_sound.bas` to load the ML routine into memory, then run a program like `play_charge.bas` to play a song using `CALL 768`.
 - In this interpreter, the ML routine is emulated natively—no need to run `init_sound.bas` first.
 

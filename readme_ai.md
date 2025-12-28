@@ -205,8 +205,7 @@ This interpreter supports both modern and classic Apple II sound routines:
 - **SOUND freq, duration**: Direct frequency/duration playback (cross-platform via pygame).
 - **CALL 768**: Emulates the Apple II ML sound routine from Sanders & Edge’s *Kids to Kids on the Apple Computer* (Datamost, 1984), loaded by `init_sound.bas` and used by programs like `play_charge.bas`.
 
-#### Historical Context
-- The ML routine in `init_sound.bas` is a direct transcription from the Sanders & Edge book, not Beagle Bros, aplay, or jsbasic.
+- The ML routine in `init_sound.bas` is a direct transcription from the Sanders & Edge book, widely used in educational Apple II programs.
 - On real Apple II hardware, run `init_sound.bas` first to load the ML routine, then run a program (e.g., `play_charge.bas`) to play music using `CALL 768`.
 - In this interpreter, the ML routine is emulated natively—no need to run `init_sound.bas` first.
 
