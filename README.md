@@ -1,3 +1,5 @@
+![Applesoft Basic Interpreter](inc/applesoftbasicinterpreter_banner.jpg)
+
 # Applesoft BASIC Interpreter
 
 A comprehensive Python implementation of the Applesoft BASIC interpreter with full graphics support using pygame.
@@ -117,7 +119,7 @@ python applesoft.py program.bas
 
 ### Text Mode Example:
 
-![Text mode output showing PRINT and other commands](inc/test_all_commands.png)
+
 
 ### Interactive mode:
 
