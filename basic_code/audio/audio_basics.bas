@@ -10,7 +10,7 @@ REM Demonstrates direct speaker access (POKE) and SOUND command
 70 GOSUB 200
 80 PRINT ""
 90 PRINT "All demos complete!"
-100 END
+95 END
 
 REM Direct speaker poke method
 100 PRINT "  Creating clicks with direct speaker access..."

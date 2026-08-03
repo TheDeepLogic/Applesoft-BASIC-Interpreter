@@ -47,6 +47,32 @@ Helper script: `run_all_bas_tests.py`
 
 ---
 
+## Legacy README Notes
+
+These are the kinds of reminders that belong in the AI-focused guide instead of the public README.
+
+### Common Applesoft Failure Modes
+1. Variable names longer than two characters are silently truncated in Applesoft.
+2. Every line number must be unique; duplicates trigger syntax errors.
+3. Manual reading is not enough; always verify through the interpreter.
+4. Use string input variables when you need automated input tests.
+5. Check for suspiciously long variable names with a search like `grep -E '[A-Z]{3,}' yourfile.bas`.
+
+### Recommended Test Assets
+- `tests/README_TESTING.md` for interpreter and program testing workflow.
+- `run_basic_file.py` for single-program manual runs.
+- `run_all_bas_tests.py` for batch validation across the repository.
+- `basic_code/examples/TEMPLATE_GAME.bas` as a starting point for new games.
+
+### Practical AI Loop
+1. Generate or edit a BASIC program.
+2. Run it in the interpreter.
+3. Inspect output, screenshots, and errors.
+4. Fix the BASIC or interpreter issue.
+5. Repeat until the behavior matches the intended Apple II result.
+
+---
+
 ## Applesoft BASIC Language Primer
 
 ### Syntax & Structure

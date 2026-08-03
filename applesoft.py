@@ -2614,17 +2614,22 @@ class ApplesoftInterpreter:
             return
         self._last_speaker_click = now
         try:
-            if WINSOUND_AVAILABLE and os.name == 'nt':
-                # Non-blocking, short system beep fallback.
-                winsound.MessageBeep()
-            elif PYGAME_AVAILABLE:
-                # Fallback: play a short synthesized click via pygame.mixer
+            if PYGAME_AVAILABLE:
+                # Prefer the same synthesized audio path used by SOUND so clicks
+                # stay audible even when Windows system sounds are disabled.
                 self._ensure_click_sound()
                 if self._click_sound is not None:
                     try:
                         self._click_sound.play()
+                        return
                     except Exception:
                         pass
+            if WINSOUND_AVAILABLE and os.name == 'nt':
+                # Last resort on Windows: use a short system beep.
+                try:
+                    winsound.Beep(1000, 10)
+                except Exception:
+                    winsound.MessageBeep()
             else:
                 # Last resort: print a dot to indicate a click
                 print('.', end='')

@@ -20,44 +20,22 @@ This project is a Python-based Applesoft BASIC interpreter and renderer built to
 
 ## Table of Contents
 
-1. [For Developers](#for-developers) ⭐ **START HERE IF YOU'RE MAKING GAMES**
-2. [Features](#features)
-3. [Requirements](#requirements)
-4. [Quick Start](#quick-start)
-5. [Usage](#usage)
-6. [Command Reference](#command-reference)
-7. [Complete Feature List](#complete-feature-list)
-8. [POKE/PEEK/CALL Reference](#pokepeek-call-reference)
-9. [Implementation Details](#implementation-details)
-10. [Recent Lemonade Parity Changes](#recent-lemonade-parity-changes)
-11. [Known Issues](#known-issues)
-12. [Session Summary](#session-summary)
-13. [Testing](#testing)
+1. [Features](#features)
+2. [Requirements](#requirements)
+3. [Quick Start](#quick-start)
+4. [Usage](#usage)
+5. [Command Reference](#command-reference)
+6. [Complete Feature List](#complete-feature-list)
+7. [POKE/PEEK/CALL Reference](#pokepeek-call-reference)
+8. [Implementation Details](#implementation-details)
+9. [Recent Lemonade Parity Changes](#recent-lemonade-parity-changes)
+10. [Known Issues](#known-issues)
+11. [Session Summary](#session-summary)
+12. [Testing](#testing)
 
 ---
 
-## For Developers
-
-**If you're creating Applesoft BASIC games or apps for the Apple II, read these first:**
-
-| Document | Purpose |
-|----------|---------|
-| **[tests/README_TESTING.md](tests/README_TESTING.md)** | 🧪 Current testing workflow for interpreter and games |
-| **[readme_ai.md](readme_ai.md)** | 🤖 AI-focused quickstart and automation notes |
-| **[run_basic_file.py](run_basic_file.py)** | ▶ Manual launcher for interactive program runs |
-| **[basic_code/examples/TEMPLATE_GAME.bas](basic_code/examples/TEMPLATE_GAME.bas)** | 🎮 Start here to create a new game |
-
-### Key Lessons Learned
-
-The most common mistakes that break Applesoft code:
-
-1. **Variable names > 2 characters are SILENTLY TRUNCATED** (e.g., `LOC` → `LO`)
-2. **Every line number must be unique** (duplicates cause SYNTAX ERROR)
-3. **Always test through the emulator** (manual review misses truncation bugs)
-4. **Use string input (VAR$) not numeric** for automated testing
-5. **Check variable names with:** `grep -E '[A-Z]{3,}' yourfile.bas`
-
-→ See [tests/README_TESTING.md](tests/README_TESTING.md) for current testing workflow
+This project is a programmable Applesoft BASIC testbed: it runs `.bas` programs, renders Apple II output, and provides a repeatable way to verify behavior without leaving the editor or depending on a separate vintage machine. It is especially useful for testing and debugging BASIC programs end to end, including an AI workflow where the model can write code, run it, inspect the result, fix issues, and iterate until the program behaves correctly. In practice, that gives the AI a closed loop for development and troubleshooting, while also making the interpreter handy for humans who want fast validation, screenshots, and regression testing.
 
 ---
 
