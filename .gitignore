@@ -33,5 +33,19 @@ test_run_stdout.log
 test_run_stderr.log
 test_run_*.log
 
+# Temporary test output files (from this session)
+*.txt
+test_output*.txt
+full_test_output.txt
+baseline*.txt
+results*.txt
+
+# Debug and temporary files
+test_debug_*
+test_stdin_*
+debug_*
+temp_*
+tmp_*
+
 # Keep BASIC test programs in repo (default: include all .bas)
 # No ignore rules for .bas files

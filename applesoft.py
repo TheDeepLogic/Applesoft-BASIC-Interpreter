@@ -55,20 +55,20 @@ class ApplesoftInterpreter:
     # Color tables
     GR_COLORS = [
         (0, 0, 0),       # 0: Black
-        (227, 30, 96),   # 1: Magenta
-        (96, 78, 189),   # 2: Dark Blue
-        (255, 68, 253),  # 3: Purple
-        (0, 163, 96),    # 4: Dark Green
+        (200, 44, 170),  # 1: Magenta
+        (50, 62, 204),   # 2: Dark Blue (sky tone)
+        (230, 98, 224),  # 3: Purple
+        (0, 146, 74),    # 4: Dark Green
         (156, 156, 156), # 5: Gray
-        (20, 207, 253),  # 6: Medium Blue
-        (208, 195, 255), # 7: Light Blue
-        (96, 114, 3),    # 8: Brown
-        (255, 106, 60),  # 9: Orange
+        (62, 132, 246),  # 6: Medium Blue
+        (146, 182, 255), # 7: Light Blue
+        (112, 86, 0),    # 8: Brown
+        (242, 122, 38),  # 9: Orange
         (156, 156, 156), # 10: Gray
-        (255, 160, 208), # 11: Pink
-        (20, 245, 60),   # 12: Light Green
-        (208, 221, 141), # 13: Yellow
-        (114, 255, 208), # 14: Aqua
+        (246, 156, 214), # 11: Pink
+        (58, 219, 0),    # 12: Light Green
+        (239, 221, 0),   # 13: Yellow
+        (102, 242, 206), # 14: Aqua
         (255, 255, 255), # 15: White
     ]
     
@@ -87,7 +87,7 @@ class ApplesoftInterpreter:
                  autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
                  composite_blur: bool = False, statement_delay: float = 0.0015, auto_close: bool = False,
                  window_close_delay: Optional[float] = 3.0, scale: int = 2, gr_plot_delay_ms: int = 0, blit_per_line: bool = False,
-                 for_delay: Optional[float] = None):
+                 for_delay: Optional[float] = None, cpu_hz: float = 1_023_000.0):
         """Initialize the interpreter
         
         Args:
@@ -118,8 +118,18 @@ class ApplesoftInterpreter:
         self.scale = max(1, scale)  # Minimum scale of 1
         # Graphics animation delay (low-res PLOT)
         self.gr_plot_delay_ms = max(0, int(gr_plot_delay_ms))
-        # FOR/NEXT tight loop delay (user-tunable)
-        self.for_delay = for_delay if for_delay is not None else 0.00013
+        # Apple II CPU baseline and tight FOR/NEXT cycle model.
+        self.cpu_hz = max(1.0, float(cpu_hz))
+        # Tight FOR/NEXT loops are heavily used as software delay lines in many
+        # classic listings. Use a globally reasonable baseline delay rather than
+        # title/game-specific tuning so timing improves across programs.
+        self.tight_for_next_cycles = 350.0
+        # FOR/NEXT tight loop delay (user-tunable). If not provided, derive from CPU cycles.
+        self.for_delay = (
+            float(for_delay)
+            if for_delay is not None
+            else (self.tight_for_next_cycles / self.cpu_hz)
+        )
         # Optional batched display flips per BASIC line
         self.blit_per_line = bool(blit_per_line)
         self._dirty_display = False
@@ -128,8 +138,96 @@ class ApplesoftInterpreter:
         self._speaker_click_min_interval = 0.03  # seconds between clicks to avoid blocking
         # Pygame mixer click fallback
         self._mixer_ready = False
+        self._audio_failed = False
         self._click_sound = None
+        self._tone_cache = {}
+        # Global CALL 768/770 tone duration scaling (ms per duration byte).
+        self.call_tone_ms_scale = 4.0
+        # Text cursor behavior (Apple II-like blinking prompt cue).
+        self.cursor_blink_period = 0.35
+        self.cursor_enabled = True
+        self.cursor_active = False
+        self.interactive_shell_mode = False
+        # Optional INPUT/GET tracing for manual-play diagnostics.
+        self.debug_input = bool(os.environ.get('APPLESOFT_DEBUG_INPUT'))
+        self.debug_input_file = os.environ.get('APPLESOFT_DEBUG_INPUT_FILE', 'input_debug.log')
+        if self.debug_input:
+            try:
+                with open(self.debug_input_file, 'w', encoding='utf-8') as f:
+                    f.write('Applesoft input trace start\n')
+            except Exception:
+                pass
         self.reset()
+
+    def _normalize_apple_keyboard_text(self, text: str) -> str:
+        """Apple II keyboard is effectively uppercase for alphabetic input."""
+        if not text:
+            return text
+        return ''.join(ch.upper() if 'a' <= ch <= 'z' else ch for ch in text)
+
+    def _trace_input_event(self, kind: str, payload: str):
+        """Append lightweight input trace lines when debug_input is enabled."""
+        if not self.debug_input:
+            return
+        try:
+            line = getattr(self, 'current_line', 0)
+            with open(self.debug_input_file, 'a', encoding='utf-8') as f:
+                f.write(f"line={line} kind={kind} src={getattr(self, '_last_input_source', '?')} payload={payload!r}\n")
+        except Exception:
+            pass
+
+    def _effective_tight_loop_iterations(self, iter_count: int) -> int:
+        """Compress very large tight-loop delays globally to avoid extreme stalls."""
+        if iter_count <= 5000:
+            return max(0, int(iter_count))
+        # Keep short/medium loops faithful; compress only large delay loops.
+        return int(5000 + ((iter_count - 5000) * 0.25))
+
+    def _cursor_visible(self) -> bool:
+        """Blink phase for the on-screen text cursor."""
+        if not self.cursor_enabled or not self.cursor_active:
+            return False
+        period = max(0.1, float(self.cursor_blink_period))
+        phase = time.perf_counter() % (period * 2.0)
+        return phase < period
+
+    def _draw_cursor_overlay(self):
+        """Draw a non-destructive blinking cursor overlay onto the composed screen."""
+        if not (PYGAME_AVAILABLE and self.screen and self._cursor_visible()):
+            return
+
+        # Cursor is meaningful only when text is visible.
+        if self.graphics_mode == 'TEXT':
+            pass
+        elif self.graphics_mode == 'GR':
+            pass
+        elif self.graphics_mode in ['HGR', 'HGR2']:
+            if not self.hgr_mixed:
+                return
+        else:
+            return
+
+        x = max(0, min(self.TEXT_COLS - 1, int(self.text_x)))
+        y = max(0, min(self.TEXT_ROWS - 1, int(self.text_y)))
+
+        cell_w = 14
+        cell_h = 16
+        if self.scale > 1:
+            cell_w *= self.scale
+            cell_h *= self.scale
+
+        x_pixel = x * cell_w
+        y_pixel = y * cell_h
+
+        # Apple II-like prompt feel: bright solid block cursor.
+        inset = max(1, self.scale)
+        rect = pygame.Rect(
+            x_pixel + inset,
+            y_pixel + inset,
+            max(2, cell_w - (2 * inset)),
+            max(2, cell_h - (2 * inset)),
+        )
+        pygame.draw.rect(self.screen, (255, 255, 255), rect)
         
     def reset(self):
         """Reset the interpreter state"""
@@ -200,6 +298,8 @@ class ApplesoftInterpreter:
         self.last_executed_line = None
         self.input_slot = None
         self.output_slot = None
+        # Reset audio failure latch each program reset.
+        self._audio_failed = False
         
         # Keyboard polling state for PEEK(-16384)
         self.last_key_code = 0  # Last key pressed (ASCII + 128 when available)
@@ -219,6 +319,11 @@ class ApplesoftInterpreter:
 
     def _init_memory_defaults(self):
         """Initialize key memory locations to Apple II defaults."""
+        # Text window at $0020-$0023 (32-35): left, width, top, bottom
+        self.memory[32] = 0
+        self.memory[33] = 40
+        self.memory[34] = 0
+        self.memory[35] = 23
         # LOMEM pointer at $0067-$0068 (103-104): default 2048
         lomem = 2048
         self.memory[103] = lomem & 0xFF
@@ -234,6 +339,24 @@ class ApplesoftInterpreter:
         self.memory[50] = 255
         # SPEED at 241 (optional, leave 0)
         self.memory[241] = 0
+
+    def _sleep_with_event_pump(self, duration_sec: float):
+        """Sleep while pumping pygame events so the window remains responsive."""
+        remaining = max(0.0, float(duration_sec))
+        if remaining <= 0:
+            return
+
+        end_time = time.perf_counter() + remaining
+        while True:
+            remaining = end_time - time.perf_counter()
+            if remaining <= 0:
+                break
+            if PYGAME_AVAILABLE and pygame.display.get_init():
+                try:
+                    pygame.event.pump()
+                except Exception:
+                    pass
+            time.sleep(min(0.01, remaining))
 
     def init_graphics(self):
         """Initialize pygame window and text surface for the current mode."""
@@ -310,9 +433,12 @@ class ApplesoftInterpreter:
             print("No program to run")
             return
         
-        # Initialize pygame for text display
+        # Initialize pygame for text display only if needed.
+        # Reinitializing here clears text_surface, which erases prompt history;
+        # Apple II RUN should not clear the screen unless the program does so.
         if PYGAME_AVAILABLE and self.graphics_mode == 'TEXT':
-            self.init_graphics()
+            if not self.screen or not self.text_surface:
+                self.init_graphics()
         
         # Track execution start time for timeout
         start_time = time.time()
@@ -353,6 +479,9 @@ class ApplesoftInterpreter:
                             self.running = False
                             return
                         elif event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_c and (event.mod & pygame.KMOD_CTRL):
+                                # Apple II BREAK equivalent during active execution.
+                                raise KeyboardInterrupt
                             # Update keyboard buffer for PEEK(-16384)
                             # Map arrow keys and special keys to Apple II codes
                             if event.key == pygame.K_LEFT:
@@ -395,6 +524,7 @@ class ApplesoftInterpreter:
                     
                     try:
                         self.execute_statement(statement, start_index=start_index)
+                        self.last_executed_line = self.current_line
                         # Add delay to simulate Apple II speed
                         if self.statement_delay > 0:
                             time.sleep(self.statement_delay)
@@ -429,8 +559,8 @@ class ApplesoftInterpreter:
                             
                             # Display error in pygame window like Apple II
                             if PYGAME_AVAILABLE and pygame.display.get_init() and self.graphics_mode == 'TEXT':
-                                self.cmd_print(error_msg)
-                                self.cmd_print(detail_msg)
+                                self.render_text_to_surface(error_msg + '\n')
+                                self.render_text_to_surface(detail_msg + '\n')
                                 self.update_display(force=True)
                                 # Wait briefly so user can see the error
                                 time.sleep(2)
@@ -446,7 +576,14 @@ class ApplesoftInterpreter:
                     break
                     
         except KeyboardInterrupt:
-            print(f"\nBreak in line {self.pc}")
+            break_line = self.last_executed_line if self.last_executed_line is not None else self.pc
+            break_msg = f"BREAK IN {break_line}"
+            print(f"\n{break_msg}")
+            if PYGAME_AVAILABLE and pygame.display.get_init() and self.screen:
+                # Move to a clean line before/after BREAK so the interactive
+                # prompt returns on the following line like an Apple II.
+                self.render_text_to_surface("\n" + break_msg + "\n")
+                self.update_display(force=True)
         finally:
             self.running = False
             
@@ -460,8 +597,9 @@ class ApplesoftInterpreter:
                 self.save_screenshot('final')
             except Exception:
                 pass
-        # Keep pygame window open briefly (or indefinitely) unless auto-close was requested
-        if self.keep_window_open and not self.auto_close and PYGAME_AVAILABLE and pygame.display.get_init():
+        # Keep pygame window open briefly (or indefinitely) unless auto-close was requested.
+        # In interactive shell mode, return directly to the prompt instead.
+        if self.keep_window_open and not self.auto_close and not self.interactive_shell_mode and PYGAME_AVAILABLE and pygame.display.get_init():
             if self.window_close_delay is None:
                 print("\nProgram ended. Close the window to exit.")
                 while True:
@@ -511,22 +649,25 @@ class ApplesoftInterpreter:
         # Handle multiple statements on one line (separated by :)
         # IMPORTANT: Do not split IF ... THEN <actions with colons> lines here.
         stmt_upper = statement.upper().lstrip()
-        if stmt_upper.startswith('IF ') and ' THEN ' in stmt_upper:
-            parts = [statement]
+        # Always delegate to split_on_colon when ':' is present; it already
+        # ignores colons inside strings and HIMEM:/LOMEM: syntax.
+        if ':' in statement:
+            parts = self.split_on_colon(statement)
         else:
-            if ':' in statement and not self.is_in_string(statement, statement.index(':')):
-                parts = self.split_on_colon(statement)
-            else:
-                parts = [statement]
+            parts = [statement]
         
         # Record parts for IF to optionally skip rest of line when false
         self._current_line_parts = parts
+        self._skip_rest_of_line = False
         for idx in range(start_index, len(parts)):
             part = parts[idx].strip()
             if not part:
                 continue
             self.current_part_index = idx
             self.execute_single_statement(part, immediate)
+            if self._skip_rest_of_line:
+                self._skip_rest_of_line = False
+                break
             # If PC was changed by a control flow command (GOTO, GOSUB, NEXT looping back, etc.),
             # stop executing further statements on this line
             if self.pc_changed:
@@ -572,7 +713,9 @@ class ApplesoftInterpreter:
                     current.append(char)
                     i += 1
                 else:
-                    # This is a statement separator
+                    # This is a statement separator.
+                    # IF/THEN conditional tails are handled at execution time by
+                    # skipping remaining line parts when IF is false.
                     parts.append(''.join(current))
                     current = []
                     i += 1
@@ -655,7 +798,8 @@ class ApplesoftInterpreter:
         elif cmd == 'END' or cmd == 'STOP':
             self.running = False
         elif cmd == 'RUN':
-            if not immediate:
+            # RUN should work from immediate mode in the interactive prompt.
+            if immediate or not self.running:
                 self.run()
         elif cmd == 'LIST':
             self.cmd_list(args)
@@ -783,11 +927,18 @@ class ApplesoftInterpreter:
 
     def cmd_print(self, args: str):
         """PRINT command"""
-        if not args:
+        if not args or not args.strip():
             self.render_text_to_surface('\n')
             return
             
         output = []
+        # TAB/SPC/comma spacing needs to honor the current cursor column,
+        # not just the local text accumulated in this one PRINT statement.
+        base_col = int(getattr(self, 'text_x', 0))
+
+        def current_col() -> int:
+            return base_col + len(''.join(str(x) for x in output))
+
         # Parse print items
         items = self.parse_print_items(args)
         
@@ -796,17 +947,16 @@ class ApplesoftInterpreter:
                 continue  # Semicolon suppresses newline/spacing
             elif item == ',':
                 # Tab to next column (every 10 chars in Applesoft)
-                if output:
-                    current_len = len(''.join(str(x) for x in output))
-                    spaces = 10 - (current_len % 10)
-                    output.append(' ' * spaces)
+                col = current_col()
+                spaces = 10 - (col % 10)
+                output.append(' ' * spaces)
             elif isinstance(item, str) and item.startswith('TAB('):
                 # TAB function
                 n = self.evaluate(item[4:-1])
-                if output:
-                    current_len = len(''.join(str(x) for x in output))
-                    if int(n) > current_len:
-                        output.append(' ' * (int(n) - current_len))
+                target = max(0, int(n) - 1)  # Applesoft TAB uses 1-based columns
+                col = current_col()
+                if target > col:
+                    output.append(' ' * (target - col))
             elif isinstance(item, str) and item.startswith('SPC('):
                 # SPC function
                 n = self.evaluate(item[4:-1])
@@ -815,11 +965,8 @@ class ApplesoftInterpreter:
                 # Evaluate and print
                 value = self.evaluate(item)
                 if isinstance(value, float):
-                    # Format numbers with space padding
-                    if value >= 0:
-                        output.append(' ' + self.format_number(value) + ' ')
-                    else:
-                        output.append(self.format_number(value) + ' ')
+                    # Applesoft prints numeric values without forcing trailing spaces.
+                    output.append(self.format_number(value))
                 else:
                     output.append(str(value))
                     
@@ -872,10 +1019,10 @@ class ApplesoftInterpreter:
             if char == '"':
                 in_string = not in_string
                 current.append(char)
-            elif char == '(':
+            elif char == '(' and not in_string:
                 paren_depth += 1
                 current.append(char)
-            elif char == ')':
+            elif char == ')' and not in_string:
                 paren_depth -= 1
                 current.append(char)
             elif char in [';', ','] and not in_string and paren_depth == 0:
@@ -898,6 +1045,11 @@ class ApplesoftInterpreter:
         else:
             # Remove trailing zeros
             s = f"{n:.6f}".rstrip('0').rstrip('.')
+            # AppleSoft-style fractions omit the leading zero.
+            if s.startswith('-0.'):
+                s = '-.' + s[3:]
+            elif s.startswith('0.'):
+                s = '.' + s[2:]
             return s
             
     def cmd_let(self, args: str):
@@ -948,6 +1100,7 @@ class ApplesoftInterpreter:
         if line_num not in self.program:
             raise ApplesoftError(f"Undefined statement: {line_num}")
         self.pc = line_num
+        self.pc_changed = True
         
     def cmd_gosub(self, args: str):
         """GOSUB command"""
@@ -1002,19 +1155,22 @@ class ApplesoftInterpreter:
             
         # Evaluate condition
         result = self.evaluate(condition)
+        self._trace_input_event('IF', f"{condition} => {result}")
         
         # In BASIC, non-zero is true
         if result:
-            # Check if action is a line number
             if action.isdigit():
                 self.cmd_goto(action)
             else:
-                # Ensure THEN actions start at the first part, not any pending resume index
+                # Execute the immediate THEN action; if there are additional
+                # colon-separated statements on the line, the main executor
+                # will run them next.
                 self.execute_statement(action, start_index=0)
-            # Allow subsequent statements on this line to execute normally
         else:
-            # Condition false: do not execute THEN action; continue with remaining parts
-            # (Prior interpreter semantics executed subsequent colon-separated parts regardless.)
+            # Condition false: skip the rest of this source line.
+            # In Applesoft, statements after THEN separated by colons are
+            # still conditional on the IF result.
+            self._skip_rest_of_line = True
             return
                 
     def cmd_for(self, args: str):
@@ -1074,16 +1230,37 @@ class ApplesoftInterpreter:
         # 1. FOR and NEXT on same line with nothing in between (resume_part points to NEXT)
         # 2. FOR and NEXT on consecutive lines with nothing in between
         is_tight_loop = False
-        if for_line == self.pc:
-            # Same line - check if resume_part points directly to the NEXT (no statements in between)
-            # Count statements to see if NEXT immediately follows FOR
-            if hasattr(self, 'current_part_index'):
-                # If current part is NEXT and resume_part is current part, it's tight
-                if resume_part == self.current_part_index:
+        if for_line in self.program and self.pc in self.program:
+            for_line_parts = [p.strip() for p in self.split_on_colon(self.program[for_line])]
+            next_line_parts = [p.strip() for p in self.split_on_colon(self.program[self.pc])]
+
+            if for_line == self.pc:
+                # Same-line tight loop shape: ... FOR ... : NEXT ... with no executable
+                # statement between the FOR and this NEXT.
+                cur_idx = getattr(self, 'current_part_index', -1)
+                if 0 <= cur_idx < len(next_line_parts):
+                    cur_part = next_line_parts[cur_idx].upper()
+                    if cur_part.startswith('NEXT'):
+                        prev_idx = cur_idx - 1
+                        while prev_idx >= 0 and not next_line_parts[prev_idx]:
+                            prev_idx -= 1
+                        if prev_idx >= 0 and next_line_parts[prev_idx].upper().startswith('FOR '):
+                            is_tight_loop = True
+
+            elif next_line == self.pc and for_line != self.pc:
+                # Consecutive-line tight loop shape must be exactly:
+                #   FOR ...
+                #   NEXT ...
+                # Any additional executable statements on either line means loop has a body.
+                for_exec = [p for p in for_line_parts if p]
+                next_exec = [p for p in next_line_parts if p]
+                if (
+                    len(for_exec) == 1
+                    and for_exec[0].upper().startswith('FOR ')
+                    and len(next_exec) == 1
+                    and next_exec[0].upper().startswith('NEXT')
+                ):
                     is_tight_loop = True
-        elif next_line == self.pc and for_line != self.pc:
-            # Different consecutive lines - NEXT is on line right after FOR
-            is_tight_loop = True
         
         if is_tight_loop:
             # This is a tight loop - execute remaining iterations with Apple II timing
@@ -1095,22 +1272,32 @@ class ApplesoftInterpreter:
             # User-tunable delay for tight FOR/NEXT loops
             loop_delay = self.for_delay
             
-            # Execute remaining iterations without going through interpreter
-            while True:
-                self.variables[loop_var] += step_val
-                
-                # Check if done
-                if step_val > 0:
-                    done = self.variables[loop_var] > end_val
-                else:
-                    done = self.variables[loop_var] < end_val
-                
-                if done:
-                    break
-                
-                # Add timing delay to match real Apple II
-                if loop_delay > 0:
-                    time.sleep(loop_delay)
+            # Execute remaining iterations without walking every iteration in
+            # Python. Tight delay loops in classic BASIC can be very large.
+            start_time = time.perf_counter()
+            iter_count = 0
+            cur_val = float(self.variables.get(loop_var, 0.0))
+
+            if step_val > 0:
+                span = end_val - cur_val
+                if span >= 0:
+                    iter_count = int(math.floor(span / step_val)) + 1
+            elif step_val < 0:
+                span = cur_val - end_val
+                if span >= 0:
+                    iter_count = int(math.floor(span / (-step_val))) + 1
+            else:
+                # STEP 0 is nonsensical; avoid an infinite loop.
+                iter_count = 1
+
+            self.variables[loop_var] = cur_val + (iter_count * step_val)
+
+            if loop_delay > 0 and iter_count > 0:
+                effective_iter_count = self._effective_tight_loop_iterations(iter_count)
+                target_end = start_time + (effective_iter_count * loop_delay)
+                remaining = target_end - time.perf_counter()
+                if remaining > 0:
+                    self._sleep_with_event_pump(remaining)
             
             self.for_stack.pop()
             # Continue to next statement after NEXT
@@ -1156,16 +1343,34 @@ class ApplesoftInterpreter:
         # Display prompt and get input
         if prompt:
             self.render_text_to_surface(prompt)
-        self.render_text_to_surface('? ')
+        else:
+            # Applesoft only prefixes "? " for bare INPUT without an explicit prompt.
+            self.render_text_to_surface('? ')
+        if not PYGAME_AVAILABLE or not self.screen:
+            if prompt:
+                print(prompt, end='')
+            else:
+                print('? ', end='', flush=True)
         self.update_display(force=True)
-        
-        input_str = self.get_input_with_timeout()
+
+        self.cursor_active = True
+        try:
+            input_str = self.get_input_with_timeout()
+        finally:
+            self.cursor_active = False
+            self.update_display(force=True)
         
         if input_str is None:
             raise ApplesoftError(f"Input timeout after {self.input_timeout} seconds")
+
+        self._trace_input_event('INPUT', input_str)
         
-        # Echo the input to the display
-        self.render_text_to_surface(input_str + '\n')
+        # Echo only when input did not come from live pygame key rendering.
+        # Pygame input path already renders each typed character.
+        if getattr(self, '_last_input_source', None) == 'pygame':
+            self.render_text_to_surface('\n')
+        else:
+            self.render_text_to_surface(input_str + '\n')
         self.update_display(force=True)
             
         # Parse input values
@@ -1203,36 +1408,85 @@ class ApplesoftInterpreter:
             self.variables[var] = ord(char)
             
     def get_input_with_timeout(self) -> Optional[str]:
-        """Get input with timeout from pygame keyboard events"""
-        if not PYGAME_AVAILABLE or not self.screen:
-            # Fallback to console input if pygame not available or no screen
-            print('? ', end='', flush=True)
-            self.input_result = None
-            def input_thread():
-                try:
-                    self.input_result = input()
-                except:
-                    pass
-            thread = threading.Thread(target=input_thread, daemon=True)
-            thread.start()
-            thread.join(timeout=self.input_timeout)
-            return self.input_result
-        
-        # Get input from pygame keyboard events
+        """Get input with timeout from stdin or pygame keyboard events"""
+        if self._should_use_pygame_input():
+            self._last_input_source = 'pygame'
+            return self._read_pygame_line_with_timeout(self.input_timeout)
+
+        # Automation/headless fallback.
+        self._last_input_source = 'stdin'
+        return self._read_stdin_line_with_timeout(self.input_timeout)
+
+    def _should_use_pygame_input(self) -> bool:
+        """Choose pygame keyboard input for interactive/manual play."""
+        stdin_is_tty = False
+        try:
+            stdin_is_tty = bool(sys.stdin and sys.stdin.isatty())
+        except Exception:
+            stdin_is_tty = False
+
+        has_pygame_input = bool(PYGAME_AVAILABLE and self.screen)
+
+        # In interactive shell mode, honor piped stdin so scripted REPL flows
+        # can drive INPUT/GET inside RUN without pygame timeouts.
+        if self.interactive_shell_mode and not stdin_is_tty:
+            return False
+
+        # In manual windowed play, prefer pygame keyboard input even if stdin
+        # is not reported as a TTY by the host terminal environment.
+        # Keep stdin-first for scripted/auto-close runs where input is piped.
+        return bool(has_pygame_input and not (self.auto_close and not stdin_is_tty))
+
+    def _read_stdin_line_with_timeout(self, timeout_seconds: float) -> Optional[str]:
+        """Read one stdin line with timeout; return None on timeout."""
+        self.input_result = None
+
+        def read_stdin():
+            try:
+                line = sys.stdin.readline()
+                if line:
+                    self.input_result = line.rstrip('\n\r')
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=read_stdin, daemon=True)
+        thread.start()
+
+        deadline = time.time() + float(timeout_seconds)
+        last_blink_refresh = 0.0
+        while thread.is_alive() and time.time() < deadline:
+            thread.join(timeout=0.05)
+            # Keep UI responsive and cursor blinking while waiting on stdin.
+            now = time.perf_counter()
+            if now - last_blink_refresh >= 0.08:
+                self.update_display(force=True)
+                last_blink_refresh = now
+
+        if self.input_result is not None:
+            return self._normalize_apple_keyboard_text(self.input_result)
+
+        return None
+
+    def _read_pygame_line_with_timeout(self, timeout_seconds: float) -> Optional[str]:
+        """Read one line using pygame keyboard events; return None on timeout/cancel."""
         input_buffer = []
         start_time = time.time()
-        
+        last_blink_refresh = 0.0
+
         while True:
             # Check timeout
-            if time.time() - start_time > self.input_timeout:
+            if time.time() - start_time > timeout_seconds:
                 return None
-            
+
             # Handle pygame events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
                     return None
                 elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_c and (event.mod & pygame.KMOD_CTRL):
+                        # Treat Ctrl+C as control character input, not interpreter break.
+                        return ''.join(input_buffer) + chr(3)
                     if event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
                         # Enter pressed - return the input
                         return ''.join(input_buffer)
@@ -1255,49 +1509,70 @@ class ApplesoftInterpreter:
                         return None
                     elif event.unicode and event.unicode.isprintable():
                         # Regular character
-                        char = event.unicode
+                        char = self._normalize_apple_keyboard_text(event.unicode)
                         input_buffer.append(char)
                         # Echo character to display
                         self.render_char_to_surface(char)
                         self.update_display(force=True)
             
             # Small delay to reduce CPU usage
+            now = time.perf_counter()
+            if now - last_blink_refresh >= 0.08:
+                self.update_display(force=True)
+                last_blink_refresh = now
             pygame.time.wait(10)
         
     def get_char_with_timeout(self) -> Optional[str]:
         """Get single character with timeout from pygame keyboard events"""
-        if not PYGAME_AVAILABLE or not self.screen:
-            # Fallback to console input
-            result = self.get_input_with_timeout()
-            if result:
-                return result[0] if result else ''
-            return None
-        
-        # Get single character from pygame
-        start_time = time.time()
-        
-        while True:
-            # Check timeout
-            if time.time() - start_time > self.input_timeout:
+        self.cursor_active = True
+        try:
+            if not self._should_use_pygame_input():
+                # Scripted/headless fallback: read one line and take first char.
+                self._last_input_source = 'stdin'
+                result = self._read_stdin_line_with_timeout(self.input_timeout)
+                if result is not None:
+                    return result[0] if result else ''
                 return None
+
+            self._last_input_source = 'pygame'
+        
+            # Get single character from pygame
+            start_time = time.time()
+            last_blink_refresh = 0.0
             
-            # Handle pygame events
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
+            while True:
+                # Check timeout
+                if time.time() - start_time > self.input_timeout:
                     return None
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
+                
+                # Handle pygame events
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.running = False
                         return None
-                    elif event.unicode and len(event.unicode) == 1:
-                        char = event.unicode
-                        # Echo character to display
-                        self.render_char_to_surface(char)
-                        self.update_display(force=True)
-                        return char
-            
-            # Small delay to reduce CPU usage
-            pygame.time.wait(10)
+                    elif event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_c and (event.mod & pygame.KMOD_CTRL):
+                            self._trace_input_event('GET', '\\x03')
+                            return chr(3)
+                        if event.key == pygame.K_ESCAPE:
+                            return None
+                        elif event.unicode and len(event.unicode) == 1:
+                            char = self._normalize_apple_keyboard_text(event.unicode)
+                            # Echo character to display
+                            self.render_char_to_surface(char)
+                            self.update_display(force=True)
+                            self._trace_input_event('GET', char)
+                            return char
+                
+                # Small delay to reduce CPU usage
+                now = time.perf_counter()
+                if now - last_blink_refresh >= 0.08:
+                    self.update_display(force=True)
+                    last_blink_refresh = now
+                pygame.time.wait(10)
+        finally:
+            self.cursor_active = False
+            self.update_display(force=True)
         
     def cmd_read(self, args: str):
         """READ command"""
@@ -1346,9 +1621,15 @@ class ApplesoftInterpreter:
                 
     def cmd_list(self, args: str):
         """LIST command"""
+        def format_list_line(line_num: int, statement: str) -> str:
+            # Apple II LIST style: padded line-number field and spacing
+            # before the statement text.
+            return f" {line_num:>4}  {statement}"
+
+        lines_to_emit: List[str] = []
         if not args:
             for line_num, statement in self.program.items():
-                print(f"{line_num} {statement}")
+                lines_to_emit.append(format_list_line(line_num, statement))
         else:
             # Parse range
             if '-' in args:
@@ -1360,29 +1641,94 @@ class ApplesoftInterpreter:
                 
             for line_num, statement in self.program.items():
                 if start <= line_num <= end:
-                    print(f"{line_num} {statement}")
+                    lines_to_emit.append(format_list_line(line_num, statement))
+
+        if lines_to_emit and PYGAME_AVAILABLE and self.screen:
+            self.render_text_to_surface('\n')
+
+        for line in lines_to_emit:
+            print(line)
+            if PYGAME_AVAILABLE and self.screen:
+                self.render_text_to_surface(line + '\n')
+
+        # Apple II LIST leaves an additional carriage return before the next prompt.
+        if lines_to_emit:
+            print()
+            if PYGAME_AVAILABLE and self.screen:
+                self.render_text_to_surface('\n')
+        if PYGAME_AVAILABLE and self.screen and lines_to_emit:
+            self.update_display(force=True)
                     
     def render_char_to_surface(self, char: str):
         """Render a single character to the text surface at the current cursor position"""
         if not PYGAME_AVAILABLE or not self.screen or not self.font:
             return
+
+        def get_window_bounds():
+            left = int(self.memory[32]) if 0 <= int(self.memory[32]) < self.TEXT_COLS else 0
+            width = int(self.memory[33]) if int(self.memory[33]) > 0 else self.TEXT_COLS
+            top = int(self.memory[34]) if 0 <= int(self.memory[34]) < self.TEXT_ROWS else 0
+            bottom = int(self.memory[35]) if 0 <= int(self.memory[35]) < self.TEXT_ROWS else (self.TEXT_ROWS - 1)
+            right = min(self.TEXT_COLS - 1, max(left, left + width - 1))
+            if bottom < top:
+                bottom = top
+            return left, right, top, bottom
+
+        def gr_set_cell(x: int, y: int, color_index: int):
+            if not (0 <= x < self.GR_WIDTH and 0 <= y < self.GR_HEIGHT):
+                return
+            self.gr_buffer[y][x] = color_index % 16
+            if self.gr_surface:
+                color = self.GR_COLORS[color_index % 16]
+                rect = pygame.Rect(x * 14, y * 8, 14, 8)
+                pygame.draw.rect(self.gr_surface, color, rect)
+
+        def render_gr_semigraphics_char(ch: str, x_col: int, y_row: int):
+            # In Apple II GR mode, characters in the graphics area map to two 4-bit colors.
+            # Applesoft text is typically stored with bit 7 set, which is what classic
+            # listings like Lemonade Stand rely on for pink/green logo animation.
+            code = ord(ch) & 0x7F
+            cell_byte = code | 0x80
+            top_color = cell_byte & 0x0F
+            bottom_color = (cell_byte >> 4) & 0x0F
+            y_top = y_row * 2
+            y_bottom = y_top + 1
+            gr_set_cell(x_col, y_top, top_color)
+            if y_bottom < self.GR_HEIGHT:
+                gr_set_cell(x_col, y_bottom, bottom_color)
+
+        window_left, window_right, window_top, window_bottom = get_window_bounds()
         
-        # In HGR/HGR2 mode, start text at row 20 (bottom 4 lines)
+        # In HGR/HGR2 mode, text is constrained to bottom 4 rows.
         if self.graphics_mode in ['HGR', 'HGR2']:
             min_text_row = 20
             max_text_row = 23
         else:
-            min_text_row = 0
-            max_text_row = self.TEXT_ROWS - 1
+            min_text_row = max(0, min(window_top, self.TEXT_ROWS - 1))
+            max_text_row = max(min_text_row, min(window_bottom, self.TEXT_ROWS - 1))
+
+        if self.text_y < min_text_row:
+            self.text_y = min_text_row
+        elif self.text_y > max_text_row:
+            self.text_y = max_text_row
+        if self.text_x < window_left:
+            self.text_x = window_left
+        elif self.text_x > window_right:
+            self.text_x = window_left
         
         # Handle special characters
         if char == '\n':
             self.text_y += 1
-            self.text_x = 0
+            self.text_x = window_left if self.graphics_mode not in ['HGR', 'HGR2'] else 0
             if self.text_y > max_text_row:
                 # Scroll up within text area
-                self.scroll_text_up()
-                self.text_y = max_text_row
+                if self.graphics_mode == 'GR' and max_text_row <= 19:
+                    # Keep GR graphics-area cursor bounded; old listings often rely on
+                    # explicit VTAB/HTAB positioning rather than scrolling here.
+                    self.text_y = max_text_row
+                else:
+                    self.scroll_text_up()
+                    self.text_y = max_text_row
         elif ord(char) < 32:
             # Control character - skip rendering (bell, tab, etc.)
             # Bell character (CHR$(7)) would play a sound in real Apple II
@@ -1391,6 +1737,16 @@ class ApplesoftInterpreter:
                 pass
             return
         else:
+            if self.graphics_mode == 'GR' and self.text_y <= 19:
+                render_gr_semigraphics_char(char, self.text_x, self.text_y)
+                self.text_x += 1
+                if self.text_x > window_right:
+                    self.text_x = window_left
+                    self.text_y += 1
+                    if self.text_y > max_text_row:
+                        self.text_y = max_text_row
+                return
+
             # Render character at current position
             x_pixel = self.text_x * 14
             y_pixel = self.text_y * 16
@@ -1404,8 +1760,8 @@ class ApplesoftInterpreter:
             self.text_surface.blit(char_surface, (x_pixel, y_pixel))
             
             self.text_x += 1
-            if self.text_x >= self.TEXT_COLS:
-                self.text_x = 0
+            if self.text_x > window_right:
+                self.text_x = window_left if self.graphics_mode not in ['HGR', 'HGR2'] else 0
                 self.text_y += 1
                 if self.text_y > max_text_row:
                     self.scroll_text_up()
@@ -1456,6 +1812,13 @@ class ApplesoftInterpreter:
     def cmd_text(self):
         """TEXT command - switch to text mode"""
         self.graphics_mode = 'TEXT'
+        # TEXT mode returns to full-screen text window on Apple II.
+        self.memory[32] = 0
+        self.memory[33] = 40
+        self.memory[34] = 0
+        self.memory[35] = 23
+        self.text_x = 0
+        self.text_y = 0
         if PYGAME_AVAILABLE:
             self.init_graphics()
             
@@ -1612,6 +1975,8 @@ class ApplesoftInterpreter:
             for x in range(min(x1, x2), max(x1, x2) + 1):
                 if 0 <= x < self.GR_WIDTH:
                     self.gr_buffer[y][x] = self.gr_color % 16
+        if PYGAME_AVAILABLE:
+            self.update_display()
                 
     def cmd_vlin(self, args: str):
         """VLIN command - vertical line in low-res"""
@@ -1633,6 +1998,8 @@ class ApplesoftInterpreter:
             for y in range(min(y1, y2), max(y1, y2) + 1):
                 if 0 <= y < self.GR_HEIGHT:
                     self.gr_buffer[y][x] = self.gr_color % 16
+        if PYGAME_AVAILABLE:
+            self.update_display()
 
     # ---- HGR artifact helpers -------------------------------------------------
 
@@ -2045,11 +2412,8 @@ class ApplesoftInterpreter:
         
         # SPEED (241)
         elif addr == 241:
-             line = getattr(self, 'last_error_line', 0) if self.last_error else 0
-        
-             line = getattr(self, 'last_error_line', 0) if self.last_error else 0
-        # These are typically accessed via addresses 49152-49407 ($C000-$C0FF)
-             return float(getattr(self, 'last_error_code', 0) if self.last_error else 0)
+              # Timing/speed hint byte used by some software; currently stored only.
+              pass
         # $C050: TEXT mode (off=graphics)
         elif addr == 49232 or addr == ((-16304 + 65536) % 65536):
             self.graphics_mode = 'TEXT'
@@ -2166,62 +2530,58 @@ class ApplesoftInterpreter:
     def cmd_call(self, args: str):
         """CALL command - handle Apple II monitor subroutines"""
         addr = int(self.evaluate(args.strip()))
+
+        def _play_apple_tone(tone_val: int, duration_val: int):
+            """Approximate Apple II ML tone routines from tone+duration bytes."""
+            tone_val = int(tone_val) & 0xFF
+            duration_val = int(duration_val) & 0xFF
+            if tone_val <= 0 or duration_val <= 0:
+                return
+
+            # Classic Apple II routines generally use inverse tone values:
+            # smaller tone byte => higher pitch.
+            frequency = int(30000 / max(1, tone_val))
+            frequency = max(60, min(4000, frequency))
+
+            # Global mapping from duration byte -> milliseconds.
+            # Keep short durations audible and longer durations bounded.
+            duration_ms = int(duration_val * self.call_tone_ms_scale)
+            duration_ms = max(8, min(450, duration_ms))
+            self._play_tone(frequency, duration_ms)
+
+        # Common monitor routines used by classic listings
+        if addr == -958 or addr == ((-958 + 65536) % 65536):
+            # CALL -958 ($FC42): clear from current text cursor to end-of-line.
+            # Many legacy listings use this immediately before INPUT prompts.
+            if PYGAME_AVAILABLE and self.text_surface:
+                x_pixel = self.text_x * 14
+                y_pixel = self.text_y * 16
+                width = max(0, 560 - x_pixel)
+                pygame.draw.rect(self.text_surface, (0, 0, 0), pygame.Rect(x_pixel, y_pixel, width, 16))
+                self.update_display(force=True)
+            self.text_x = 0
+            return
+
+        if addr == -936 or addr == ((-936 + 65536) % 65536):
+            # CALL -936 ($FC58): text line management in monitor ROM.
+            # Minimal compatibility: move to column 0 on current row.
+            self.text_x = 0
+            return
         
         # CALL 768: Apple II sound routine
-        # Reads TONE from memory location 0 (1-255) and DURATION from location 1 (1-255)
-        # This emulates the machine language sound routine loaded at address 768
+        # Reads TONE from memory location 0 and DURATION from memory location 1.
         if addr == 768:
             tone_val = int(self.memory[0]) & 0xFF
             duration_val = int(self.memory[1]) & 0xFF
+            _play_apple_tone(tone_val, duration_val)
+            return
 
-            # Universal Apple II tone-to-frequency mapping (no special cases)
-            tone_to_freq = {
-                63: 261.63,   # Middle C (C4)
-                82: 293.66,   # D4
-                103: 329.63,  # E4
-                111: 349.23,  # F4
-                124: 392.00,  # G4
-                138: 440.00,  # A4
-                151: 493.88,  # B4
-                158: 523.25,  # C5
-                167: 587.33,  # D5
-                177: 659.25,  # E5
-                182: 698.46,  # F5
-                190: 783.99,  # G5
-                198: 880.00,  # A5
-                203: 987.77   # B5
-            }
-
-            if tone_val in tone_to_freq:
-                frequency = int(tone_to_freq[tone_val])
-            elif tone_val > 0:
-                sorted_tones = sorted(tone_to_freq.keys())
-                if tone_val < sorted_tones[0]:
-                    t1, t2 = sorted_tones[0], sorted_tones[1]
-                    f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
-                    ratio = (f2 / f1) ** (1.0 / (t2 - t1))
-                    frequency = int(f1 * (ratio ** (tone_val - t1)))
-                elif tone_val > sorted_tones[-1]:
-                    t1, t2 = sorted_tones[-2], sorted_tones[-1]
-                    f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
-                    ratio = (f2 / f1) ** (1.0 / (t2 - t1))
-                    frequency = int(f2 * (ratio ** (tone_val - t2)))
-                else:
-                    for i in range(len(sorted_tones) - 1):
-                        if sorted_tones[i] < tone_val < sorted_tones[i + 1]:
-                            t1, t2 = sorted_tones[i], sorted_tones[i + 1]
-                            f1, f2 = tone_to_freq[t1], tone_to_freq[t2]
-                            ratio = (f2 / f1) ** (1.0 / (t2 - t1))
-                            frequency = int(f1 * (ratio ** (tone_val - t1)))
-                            break
-                frequency = max(40, min(4000, frequency))
-            else:
-                frequency = 440
-
-            # Convert duration value (1-255) to milliseconds (Apple II timing loop estimate)
-            duration_ms = duration_val * 5
-
-            self._play_tone(frequency, duration_ms)
+        # CALL 770: compact ML tone entry used by many Apple II listings,
+        # reading tone/duration from addresses 768/769.
+        if addr == 770:
+            tone_val = int(self.memory[768]) & 0xFF
+            duration_val = int(self.memory[769]) & 0xFF
+            _play_apple_tone(tone_val, duration_val)
             return
         
         # Handle common Apple II ROM routines
@@ -2255,8 +2615,8 @@ class ApplesoftInterpreter:
         self._last_speaker_click = now
         try:
             if WINSOUND_AVAILABLE and os.name == 'nt':
-                # Short, quiet-ish beep
-                winsound.Beep(880, 20)  # 880 Hz for 20 ms
+                # Non-blocking, short system beep fallback.
+                winsound.MessageBeep()
             elif PYGAME_AVAILABLE:
                 # Fallback: play a short synthesized click via pygame.mixer
                 self._ensure_click_sound()
@@ -2356,6 +2716,11 @@ class ApplesoftInterpreter:
         if duration_ms <= 0 or freq_hz <= 0:
             return
         volume = max(0.0, min(1.0, volume))
+
+        # If audio init failed once, avoid repeatedly retrying expensive setup.
+        if getattr(self, '_audio_failed', False):
+            self._speaker_click()
+            return
         
         if not PYGAME_AVAILABLE:
             # Fallback: approximate with repeated clicks
@@ -2369,22 +2734,34 @@ class ApplesoftInterpreter:
             if not self._mixer_ready:
                 pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
                 self._mixer_ready = True
-            sample_rate = 44100
             duration_sec = duration_ms / 1000.0
-            total_samples = int(sample_rate * duration_sec)
-            import array, math as _math
-            amp = int(30000 * volume)
-            samples = array.array('h')
-            for n in range(total_samples):
-                t = n / sample_rate
-                val = int(amp * _math.sin(2 * _math.pi * freq_hz * t))
-                samples.append(val)
-            snd_bytes = samples.tobytes()
-            tone = pygame.mixer.Sound(buffer=snd_bytes)
+
+            # Weather/music routines may call CALL 770 hundreds of times with
+            # repeated parameters. Reuse generated samples to avoid expensive
+            # per-call PCM synthesis overhead.
+            key = (int(round(freq_hz)), int(round(duration_ms)), int(round(volume * 100)))
+            tone = self._tone_cache.get(key)
+            if tone is None:
+                sample_rate = 22050
+                total_samples = int(sample_rate * duration_sec)
+                import array, math as _math
+                amp = int(30000 * volume)
+                samples = array.array('h')
+                for n in range(total_samples):
+                    t = n / sample_rate
+                    val = int(amp * _math.sin(2 * _math.pi * freq_hz * t))
+                    samples.append(val)
+                snd_bytes = samples.tobytes()
+                tone = pygame.mixer.Sound(buffer=snd_bytes)
+                if len(self._tone_cache) > 128:
+                    self._tone_cache.clear()
+                self._tone_cache[key] = tone
+
             tone.play()
             # Busy wait for completion to keep timing closer to duration
-            time.sleep(duration_sec)
+            self._sleep_with_event_pump(duration_sec)
         except Exception:
+            self._audio_failed = True
             # Last resort: click once
             self._speaker_click()
         
@@ -2649,13 +3026,61 @@ class ApplesoftInterpreter:
             
     def cmd_load(self, args: str):
         """LOAD command - load program from cassette"""
-        # Not implemented - cassette I/O simulation
-        pass
+        raw_name = (args or '').strip().strip('"')
+        if not raw_name:
+            raise ApplesoftError("LOAD requires a filename")
+
+        program_path = resolve_program_path(raw_name)
+        if not program_path:
+            # Also try inside the project basic_code directory for bare names.
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            candidate = raw_name if raw_name.lower().endswith('.bas') else f"{raw_name}.bas"
+            direct = os.path.join(script_dir, 'basic_code', candidate)
+            if os.path.isfile(direct):
+                program_path = direct
+
+        if not program_path:
+            raise ApplesoftError(f"File not found: {raw_name}")
+
+        self.load_program(program_path)
+        msg = f"LOADED {os.path.basename(program_path)}"
+        print(msg)
+        if PYGAME_AVAILABLE and self.screen:
+            self.render_text_to_surface(msg + '\n')
+            self.update_display(force=True)
             
     def cmd_save(self, args: str):
         """SAVE command - save program to cassette"""
-        # Not implemented - cassette I/O simulation
-        pass
+        if not self.program:
+            raise ApplesoftError("No program to save")
+
+        raw_name = (args or '').strip().strip('"')
+        if raw_name:
+            # Keep SAVE rooted in basic_code by default: drop any path component.
+            base_name = os.path.basename(raw_name)
+        elif self.program_filename:
+            base_name = os.path.basename(self.program_filename)
+        else:
+            base_name = 'program.bas'
+
+        if not base_name.lower().endswith('.bas'):
+            base_name += '.bas'
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        save_dir = os.path.join(script_dir, 'basic_code')
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, base_name)
+
+        with open(save_path, 'w', encoding='utf-8') as f:
+            for line_num, statement in sorted(self.program.items()):
+                f.write(f"{line_num} {statement}\n")
+
+        self.program_filename = save_path
+        msg = f"SAVED {os.path.basename(save_path)}"
+        print(msg)
+        if PYGAME_AVAILABLE and self.screen:
+            self.render_text_to_surface(msg + '\n')
+            self.update_display(force=True)
         
     def evaluate(self, expr: str) -> Union[float, str]:
         """Evaluate an expression"""
@@ -2693,47 +3118,40 @@ class ApplesoftInterpreter:
                 # Normalize FN names to ignore spaces after FN
                 if name_upper.startswith('FN '):
                     name_upper = 'FN' + name_upper[3:]
+                # Find the matching closing paren for this function/array access.
+                depth = 0
+                closing_paren_pos = -1
+                for i in range(paren_pos, len(expr)):
+                    if expr[i] == '(':
+                        depth += 1
+                    elif expr[i] == ')':
+                        depth -= 1
+                        if depth == 0:
+                            closing_paren_pos = i
+                            break
+                is_standalone_call = closing_paren_pos > 0 and closing_paren_pos == len(expr) - 1
+
                 if name_upper in ['INT', 'ABS', 'SGN', 'SQR', 'SIN', 'COS', 'TAN', 
                                  'ATN', 'LOG', 'EXP', 'RND',
                                  'PEEK', 'PDL', 'SCRN', 'HSCRN', 'POS', 'FRE']:
-                    # Find the matching closing paren for this function
-                    depth = 0
-                    closing_paren_pos = -1
-                    for i in range(paren_pos, len(expr)):
-                        if expr[i] == '(':
-                            depth += 1
-                        elif expr[i] == ')':
-                            depth -= 1
-                            if depth == 0:
-                                closing_paren_pos = i
-                                break
-                    
-                    # Only treat as function call if the closing paren is at the end
-                    # Otherwise it's something like RND(1)*279 which needs to be parsed as multiplication
-                    if closing_paren_pos > 0 and closing_paren_pos == len(expr) - 1:
+                    # Only treat as function call if the closing paren is at the end.
+                    # Otherwise it's something like RND(1)*279 or LEFT$(A$,1)="Y"
+                    # and needs full expression parsing.
+                    if is_standalone_call:
                         return self.evaluate_function(expr)
                 elif name_upper in ['LEN', 'VAL', 'ASC']:
-                    # These can work with strings
-                    return self.evaluate_string_or_numeric_function(expr)
+                    # These can work with strings, but only as standalone calls.
+                    if is_standalone_call:
+                        return self.evaluate_string_or_numeric_function(expr)
                 elif name_upper.startswith('FN'):
-                    return self.evaluate_user_function(expr)
+                    if is_standalone_call:
+                        return self.evaluate_user_function(expr)
                 elif '$' in name_upper and name_upper.replace('$', '') in ['STR', 'CHR', 'LEFT', 'RIGHT', 'MID']:
-                    return self.evaluate_string_function(expr)
+                    if is_standalone_call:
+                        return self.evaluate_string_function(expr)
                 else:
-                    # Array access - find the matching closing paren
-                    depth = 0
-                    closing_paren_pos = -1
-                    for i in range(paren_pos, len(expr)):
-                        if expr[i] == '(':
-                            depth += 1
-                        elif expr[i] == ')':
-                            depth -= 1
-                            if depth == 0:
-                                closing_paren_pos = i
-                                break
-                    
-                    # Only treat as array access if the closing paren is at the end (possibly with whitespace)
-                    if closing_paren_pos > 0 and closing_paren_pos == len(expr) - 1:
+                    # Only treat as array access if the closing paren is at the end.
+                    if is_standalone_call:
                         var_name = name_part.upper()
                         indices_str = expr[paren_pos + 1:closing_paren_pos]
                         indices = [int(self.evaluate(idx.strip())) for idx in indices_str.split(',')]
@@ -3135,7 +3553,7 @@ class ApplesoftInterpreter:
     def evaluate_string_or_numeric_function(self, expr: str) -> Union[float, str]:
         """Evaluate functions that can work with both strings and numbers (LEN, VAL, ASC)"""
         paren_pos = expr.index('(')
-        func_name = expr[:paren_pos].upper()
+        func_name = expr[:paren_pos].strip().upper()
         args_str = expr[paren_pos + 1:expr.rindex(')')]
         
         if func_name == 'LEN':
@@ -3286,6 +3704,10 @@ class ApplesoftInterpreter:
                     self.screen.blit(scaled_text, (0, 320 * self.scale), pygame.Rect(0, 320 * self.scale, 560 * self.scale, 64 * self.scale))
                 else:
                     self.screen.blit(self.text_surface, (0, 320), text_rect)
+
+        # Draw blinking text cursor as final overlay so it doesn't mutate
+        # underlying text/graphics surfaces.
+        self._draw_cursor_overlay()
             
         pygame.display.flip()
         self._dirty_display = False
@@ -3320,13 +3742,166 @@ def resolve_program_path(name: str) -> Optional[str]:
     return None
 
 
+def read_console_line_with_ui_pump(prompt: str, interp: "ApplesoftInterpreter") -> Optional[str]:
+    """Read one console line while keeping pygame responsive."""
+    print(prompt, end='', flush=True)
+
+    result = {'line': None, 'error': None}
+
+    def read_stdin_line():
+        try:
+            result['line'] = sys.stdin.readline()
+        except Exception as exc:
+            result['error'] = exc
+
+    reader = threading.Thread(target=read_stdin_line, daemon=True)
+    reader.start()
+
+    while reader.is_alive():
+        reader.join(timeout=0.05)
+        if PYGAME_AVAILABLE:
+            try:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        interp.running = False
+                if interp.screen:
+                    interp.update_display(force=True)
+            except Exception:
+                pass
+
+    if result['error'] is not None:
+        raise result['error']
+
+    line = result['line']
+    if line is None or line == '':
+        return None
+    return line.rstrip('\n\r')
+
+
+def run_interactive_prompt(interp: "ApplesoftInterpreter"):
+    """Run immediate-mode BASIC prompt, preferring in-window keyboard input."""
+    interp.interactive_shell_mode = True
+    prompt_needs_line_advance = False
+
+    def format_immediate_error(err: ApplesoftError) -> str:
+        msg = str(err).strip().upper()
+        if 'UNKNOWN COMMAND' in msg or 'SYNTAX ERROR' in msg:
+            return '?SYNTAX ERROR'
+        if 'TYPE MISMATCH' in msg:
+            return '?TYPE MISMATCH ERROR'
+        if 'DIVISION BY ZERO' in msg:
+            return '?DIVISION BY ZERO ERROR'
+        if 'UNDEFINED STATEMENT' in msg:
+            return '?UNDEF\'D STATEMENT ERROR'
+        if 'RETURN WITHOUT GOSUB' in msg:
+            return '?RETURN WITHOUT GOSUB ERROR'
+        if 'NEXT WITHOUT FOR' in msg:
+            return '?NEXT WITHOUT FOR ERROR'
+        return f'?{msg}'
+
+    try:
+        if PYGAME_AVAILABLE and interp.screen:
+            interp.cmd_text()
+            interp.cmd_home()
+            title = "APPLE ]["
+            left_pad = max(0, (interp.TEXT_COLS - len(title)) // 2)
+            interp.render_text_to_surface((" " * left_pad) + title + "\n\n")
+            interp.update_display(force=True)
+
+        print("APPLE ][")
+        print("Type NEW, LIST, RUN, LOAD, SAVE")
+        print()
+
+        while True:
+            try:
+                # In interactive mode, prefer pygame prompt for real TTY sessions,
+                # but honor piped stdin for scripted runs.
+                stdin_is_tty = False
+                try:
+                    stdin_is_tty = bool(sys.stdin and sys.stdin.isatty())
+                except Exception:
+                    stdin_is_tty = False
+
+                using_pygame_prompt = bool(PYGAME_AVAILABLE and interp.screen and stdin_is_tty)
+                line: Optional[str]
+                interp.running = True
+
+                # Apple II prompt behavior: after any entered line returns
+                # control to the prompt, advance exactly one line before
+                # showing the next prompt. If output ended mid-line, this
+                # lands the prompt on the next line; if output already ended
+                # at column 0, this yields the blank line Apple II shows.
+                if PYGAME_AVAILABLE and interp.screen:
+                    if prompt_needs_line_advance:
+                        interp.render_text_to_surface('\n')
+                        interp.update_display(force=True)
+                prompt_needs_line_advance = False
+
+                if using_pygame_prompt:
+                    interp.render_text_to_surface(']')
+                    interp.update_display(force=True)
+                    interp.cursor_active = True
+                    try:
+                        line = interp._read_pygame_line_with_timeout(24 * 60 * 60)
+                    finally:
+                        interp.cursor_active = False
+                        interp.update_display(force=True)
+
+                    if line is None:
+                        if not interp.running:
+                            break
+                        # ESC in prompt just yields a new prompt line.
+                        interp.render_text_to_surface('\n')
+                        interp.update_display(force=True)
+                        continue
+
+                    interp.render_text_to_surface('\n')
+                    interp.update_display(force=True)
+                    print(f"]{line}")
+                else:
+                    line = read_console_line_with_ui_pump(']', interp)
+                    if line is None:
+                        break
+                    if PYGAME_AVAILABLE and interp.screen:
+                        interp.render_text_to_surface(f"]{line}\n")
+                        interp.update_display(force=True)
+
+                line = line.strip()
+                if not line:
+                    continue
+
+                if line.upper() in ('EXIT', 'QUIT', 'BYE'):
+                    break
+
+                prompt_needs_line_advance = True
+
+                try:
+                    interp.parse_line(line)
+                except ApplesoftError as e:
+                    msg = format_immediate_error(e)
+                    print(msg)
+                    if PYGAME_AVAILABLE and interp.screen:
+                        interp.render_text_to_surface(msg + '\n')
+                        interp.update_display(force=True)
+            except KeyboardInterrupt:
+                print("\nBREAK")
+                if PYGAME_AVAILABLE and interp.screen:
+                    interp.render_text_to_surface("\nBREAK\n")
+                    interp.update_display(force=True)
+                break
+    finally:
+        interp.interactive_shell_mode = False
+
+
 def main():
     """Main entry point"""
     import argparse
     
     parser = argparse.ArgumentParser(description='Applesoft BASIC Interpreter')
     parser.add_argument('--for-delay', type=float, default=None,
-                       help='Delay in seconds per iteration for tight FOR/NEXT loops (default: 0.00013)')
+                       help='Delay in seconds per iteration for tight FOR/NEXT loops (default: derived from --cpu-hz and Apple II cycle model)')
+    parser.add_argument('--cpu-hz', type=float, default=1_023_000.0,
+                       help='CPU clock used for timing-derived emulation paths like tight FOR/NEXT loops (default: 1023000)')
     parser.add_argument('filename', nargs='?', help='BASIC program file to load')
     parser.add_argument('--input-timeout', type=float, default=30.0,
                        help='Input timeout in seconds (default: 30)')
@@ -3373,7 +3948,8 @@ def main():
         window_close_delay=None if args.close_delay is not None and args.close_delay < 0 else args.close_delay,
         scale=args.scale,
         blit_per_line=args.blit_per_line,
-        for_delay=args.for_delay
+        for_delay=args.for_delay,
+        cpu_hz=args.cpu_hz
     )
     
     if args.filename:
@@ -3405,20 +3981,7 @@ def main():
             traceback.print_exc()
     else:
         # Interactive mode
-        print("Applesoft BASIC Interpreter")
-        print("Type NEW to start, LIST to view program, RUN to execute")
-        print()
-        
-        while True:
-            try:
-                line = input('] ')
-                if line.upper() == 'EXIT' or line.upper() == 'QUIT':
-                    break
-                interp.parse_line(line)
-            except KeyboardInterrupt:
-                print("\nUse EXIT to quit")
-            except Exception as e:
-                print(f"Error: {e}")
+        run_interactive_prompt(interp)
 
 
 if __name__ == '__main__':

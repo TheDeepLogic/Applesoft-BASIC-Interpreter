@@ -20,19 +20,46 @@ This project is a Python-based Applesoft BASIC interpreter and renderer built to
 
 ## Table of Contents
 
-1. [Features](#features)
-2. [Requirements](#requirements)
-3. [Quick Start](#quick-start)
-4. [Usage](#usage)
-5. [Command Reference](#command-reference)
-6. [Complete Feature List](#complete-feature-list)
-7. [POKE/PEEK/CALL Reference](#pokepeek-call-reference)
-8. [Implementation Details](#implementation-details)
-9. [Session Summary](#session-summary)
-10. [Testing](#testing)
+1. [For Developers](#for-developers) ⭐ **START HERE IF YOU'RE MAKING GAMES**
+2. [Features](#features)
+3. [Requirements](#requirements)
+4. [Quick Start](#quick-start)
+5. [Usage](#usage)
+6. [Command Reference](#command-reference)
+7. [Complete Feature List](#complete-feature-list)
+8. [POKE/PEEK/CALL Reference](#pokepeek-call-reference)
+9. [Implementation Details](#implementation-details)
+10. [Recent Lemonade Parity Changes](#recent-lemonade-parity-changes)
+11. [Known Issues](#known-issues)
+12. [Session Summary](#session-summary)
+13. [Testing](#testing)
 
 ---
 
+## For Developers
+
+**If you're creating Applesoft BASIC games or apps for the Apple II, read these first:**
+
+| Document | Purpose |
+|----------|---------|
+| **[tests/README_TESTING.md](tests/README_TESTING.md)** | 🧪 Current testing workflow for interpreter and games |
+| **[readme_ai.md](readme_ai.md)** | 🤖 AI-focused quickstart and automation notes |
+| **[run_basic_file.py](run_basic_file.py)** | ▶ Manual launcher for interactive program runs |
+| **[basic_code/examples/TEMPLATE_GAME.bas](basic_code/examples/TEMPLATE_GAME.bas)** | 🎮 Start here to create a new game |
+
+### Key Lessons Learned
+
+The most common mistakes that break Applesoft code:
+
+1. **Variable names > 2 characters are SILENTLY TRUNCATED** (e.g., `LOC` → `LO`)
+2. **Every line number must be unique** (duplicates cause SYNTAX ERROR)
+3. **Always test through the emulator** (manual review misses truncation bugs)
+4. **Use string input (VAR$) not numeric** for automated testing
+5. **Check variable names with:** `grep -E '[A-Z]{3,}' yourfile.bas`
+
+→ See [tests/README_TESTING.md](tests/README_TESTING.md) for current testing workflow
+
+---
 
 ## Sound Emulation and Music
 
@@ -127,12 +154,21 @@ python applesoft.py program.bas
 python applesoft.py
 ```
 
+This opens an Apple II-style immediate-mode prompt in the pygame window.
+
 Then type BASIC commands directly:
 ```basic
 ] 10 PRINT "HELLO"
 ] 20 GOTO 10
 ] RUN
 ```
+
+Current prompt behavior intentionally tracks Apple II / AppleWin conventions closely:
+- numbered lines are stored, not executed immediately
+- immediate statements like `PRINT`, `HOME`, `TEXT`, and `NEW` return to the `]` prompt with Apple-style carriage-return spacing
+- `RUN` does not clear the screen unless the BASIC program itself does so
+- `PRINT "TEXT"` and `PRINT "TEXT";` differ in prompt placement the same way they do in Applesoft
+- `LIST` formatting and prompt spacing were tuned against AppleWin behavior
 
 ### Command-line options:
 
@@ -190,6 +226,8 @@ python applesoft.py program.bas
 ```bash
 python applesoft.py
 ```
+
+This mode is useful for entering small programs from scratch, testing immediate-mode behavior, and comparing prompt/output flow against AppleWin.
 
 Then type BASIC commands directly:
 ```basic
@@ -353,8 +391,8 @@ Then type BASIC commands directly:
 - `CLEAR` - Clear variables
 - `IN# slot` - Set input slot (stub)
 - `PR# slot` - Set output slot (stub)
-- `LOAD` - Load from cassette (stub)
-- `SAVE` - Save to cassette (stub)
+- `LOAD filename` - Load a BASIC program by name or path
+- `SAVE filename` - Save the current BASIC program into `basic_code/` by default
 
 ---
 
@@ -418,6 +456,7 @@ Then type BASIC commands directly:
 - ✅ `RUN` - Run program
 - ✅ `LIST` - List program
 - ✅ `CLEAR` - Clear variables
+- ✅ `LOAD` / `SAVE` - Interactive BASIC file load/save workflow
 
 #### Advanced Commands
 - ✅ `ONERR GOTO` - Set error handler
@@ -426,7 +465,6 @@ Then type BASIC commands directly:
 - ✅ `PEEK` - Read memory
 - ✅ `CALL` - Call monitor routine
 - ⚠️ `IN#` / `PR#` - I/O redirection (stub)
-- ⚠️ `LOAD` / `SAVE` - Cassette I/O (stub)
 
 ### All Built-In Functions (30+)
 
@@ -694,6 +732,72 @@ Total: 61 organized test files
 
 ---
 
+## Recent Lemonade Parity Changes
+
+This project used `basic_code/games/lemonade.bas` as a behavior baseline to improve interpreter fidelity, while keeping the fixes global rather than game-specific.
+
+### What Changed
+
+1. Input and branch correctness
+- Fixed IF/THEN execution so colon-separated tail statements execute correctly.
+- Fixed expression parsing for comparisons like `LEFT$(A$,1)="Y"` so conditions evaluate as booleans instead of accidental string truthiness.
+- Unified manual input routing (`pygame` keyboard) and scripted input routing (`stdin`) to remove inconsistent prompt behavior.
+- Normalized keyboard text toward Apple II expectations by uppercasing alphabetic input.
+
+2. Global timing and pacing improvements
+- Improved tight `FOR/NEXT` timing model and calibration behavior through global interpreter settings.
+- Refined CALL tone timing through global scaling and bounded duration mapping.
+- Preserved program-agnostic behavior: no line-number hacks or Lemonade-only overrides.
+
+3. Cursor and interaction improvements
+- Added an Apple II-style blinking text cursor during active `INPUT`/`GET` waits.
+- Kept cursor rendering scoped to active text input instead of always-on overlay.
+
+4. Interactive mode and Apple II prompt fidelity
+- Running `python applesoft.py` without a filename now opens an Apple II-style immediate-mode prompt in the pygame window.
+- Prompt spacing after entered lines, `RUN`, `NEW`, `LIST`, syntax errors, and BREAK handling were tuned against AppleWin behavior.
+- `RUN` no longer clears the screen unless the BASIC program itself does so.
+
+5. Interactive file workflow
+- `LOAD` now resolves BASIC files by name or path.
+- `SAVE` now writes the current BASIC program into `basic_code/` by default, making the no-file prompt useful for creating programs from scratch.
+
+### How Lemonade (1979) Was Used for Testing
+
+We repeatedly tested with the historical Lemonade program flow and compared behavior against known Apple II emulator behavior, including:
+
+- Prompt sequencing and replay flow (`NEW GAME`, `CHANGE ANYTHING?`, day-to-day loop progression)
+- Input handling across manual and piped/scripted runs
+- Audio pacing and title/report cadence
+- Output formatting and weather/report transitions
+
+Typical commands used during parity testing:
+
+```bash
+python applesoft.py basic_code/games/lemonade.bas --input-timeout 120 --exec-timeout 600
+python run_basic_file.py lemonade --input-timeout 120 --exec-timeout 600
+```
+
+For scripted verification and diagnostics we also used piped input plus input tracing via environment variables when needed.
+
+### Lemonade Program Credits (from source REM statements)
+
+The `lemonade.bas` source credits indicate:
+
+- Original program by Bob Jamison
+- Minnesota Educational Computing Consortium (MECC)
+- Apple modification dated February 1979 by Charlie Kellner
+- Later revisions: V.3 by Drew Lynch, V.4 by Bruce Tognazzini
+
+These credits remain with the source program; this interpreter work aims to preserve behavior while running on modern systems.
+
+---
+
+## Known Issues
+
+1. Sound parity variance
+- Tone timbre, envelope, and perceived duration can still vary versus original hardware or emulator audio output due to modern audio stacks and host timing differences.
+
 ## Session Summary
 
 ### Accomplishments
@@ -904,8 +1008,8 @@ python applesoft.py basic_code/graphics_hires/test_snow.bas --autosnap-on-end
    - `DRAW`/`XDRAW`: Framework present, shape tables not loaded
    - `SCALE=`/`ROT=`: Settings stored but not used for drawing
 
-3. **File operations** not implemented:
-   - `LOAD`, `SAVE` - Cassette I/O stubs only
+3. **File and I/O limitations**:
+   - `LOAD`, `SAVE` support the interactive BASIC workflow, but not cassette emulation
    - `IN#`, `PR#` - I/O redirection stubs only
 
 4. **Optional features** not implemented:
