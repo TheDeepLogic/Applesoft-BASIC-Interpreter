@@ -162,6 +162,10 @@ class ApplesoftInterpreter:
         # Optional INPUT/GET tracing for manual-play diagnostics.
         self.debug_input = bool(os.environ.get('APPLESOFT_DEBUG_INPUT'))
         self.debug_input_file = os.environ.get('APPLESOFT_DEBUG_INPUT_FILE', 'input_debug.log')
+        self.test_key_queue = []
+        for key_code in os.environ.get('APPLESOFT_TEST_KEYS', '').split(','):
+            if key_code.strip():
+                self.test_key_queue.append(int(key_code.strip(), 0))
         if self.debug_input:
             try:
                 with open(self.debug_input_file, 'w', encoding='utf-8') as f:
@@ -3644,6 +3648,10 @@ class ApplesoftInterpreter:
             # Returns high-order bit = 1 if new character typed, low 7 bits = ASCII
             if addr == 49152 or addr == ((-16384 + 65536) % 65536):
                 # Return last key code with high bit set if key available
+                if self.last_key_code <= 127 and self.test_key_queue:
+                    self.last_key_code = self.test_key_queue.pop(0) | 0x80
+                    self._last_input_source = 'test-keys'
+                    self._trace_input_event('KEYDOWN', str(self.last_key_code & 0x7F))
                 return self.last_key_code
             
             # Keyboard strobe at $C010 (-16368)

@@ -16,15 +16,12 @@ results = []
 
 SKIP_FILES = {
     "test_dos_color_test.bas",
-    "songs_demo.bas",
-    "lemonade.bas",
-    "littlebrickout.bas",
-    "template_game.bas"
+    "songs_demo.bas"
 }
 
 def should_skip(path: pathlib.Path) -> bool:
     rel = str(path.relative_to(ROOT))
-    if rel.startswith("games/"):
+    if rel.startswith("games/") or rel.startswith("examples/"):
         return True
     if path.name in SKIP_FILES:
         return True

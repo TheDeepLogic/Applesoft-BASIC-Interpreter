@@ -28,7 +28,7 @@ This project is a Python-based Applesoft BASIC interpreter and renderer built to
 6. [Complete Feature List](#complete-feature-list)
 7. [POKE/PEEK/CALL Reference](#pokepeek-call-reference)
 8. [Implementation Details](#implementation-details)
-9. [AI Workflow Example: TEMPLATE_GAME](#ai-workflow-example-template_game)
+9. [AI Workflow Example: Snake](#ai-workflow-example-snake)
 10. [Recent Lemonade Parity Changes](#recent-lemonade-parity-changes)
 11. [Known Issues](#known-issues)
 12. [Session Summary](#session-summary)
@@ -40,42 +40,42 @@ This project is a programmable Applesoft BASIC testbed: it runs `.bas` programs,
 
 ---
 
-## AI Workflow Example: TEMPLATE_GAME
+## AI Workflow Example: Snake
 
-One concrete example of repository value is [basic_code/examples/TEMPLATE_GAME.bas](basic_code/examples/TEMPLATE_GAME.bas), which was evolved from a starter template into a playable GR-mode game loop with a title sequence, keyboard movement, yellow-dot collision, and tunnel warp animation.
+[basic_code/examples/snake.bas](basic_code/examples/snake.bas) is an experiment in giving an AI agent a familiar game design, an Applesoft BASIC runtime, and an executable feedback loop, then letting it build and test the result. The outcome is deliberately presented as a working prototype rather than a claim of perfection: Snake is slow and clunky in places, but it is a playable game with a title screen, steering, apples, growth, lives, levels, scoring, collision rules, and Apple II-compatible sound effects.
 
-The workflow used by the AI agent was:
+The first attempt was `TEMPLATE_GAME`, a loose GR-mode experiment. It produced visual effects and some input handling, but did not become a convincing playable game. That failure was useful: screenshots exposed missing player pixels, overwritten BASIC line numbers, a collision check performed after drawing over the target, and a tunnel effect that was really just a static image followed by a delay. It was removed rather than being presented as a success.
 
-1. Start from a basic scaffold in [basic_code/examples/TEMPLATE_GAME.bas](basic_code/examples/TEMPLATE_GAME.bas).
-2. Implement gameplay features incrementally (title card, maze rendering, player movement, collision, warp effects).
-3. Run the program repeatedly with deterministic tooling:
-   ```bash
-   python applesoft.py basic_code/examples/TEMPLATE_GAME.bas --auto-close --autosnap-every 120 --blit-per-line --input-timeout 5 --exec-timeout 120
-   ```
-4. Inspect generated screenshots and runtime output to confirm what actually rendered.
-5. Apply targeted fixes for Applesoft-specific pitfalls (for example, duplicate line numbers and variable-name constraints).
-6. Re-run until behavior matched intent.
+Snake began from a known ruleset. That gave the agent concrete behavior to implement and test: move a head one cell at a time, forbid reversal into the tail, grow after a head-on apple collision, lose lives on a wall or tail hit, and advance after every apple is eaten. The work was iterative:
 
-Why this matters for visitors:
+1. Create the game state, GR playfield, border, snake segments, apples, score, lives, and level counters.
+2. Add an HGR title illustration and repeatedly correct its lettering and connected snake artwork from rendered screenshots.
+3. Exercise actual keyboard behavior. Windows key injection did not reach pygame reliably, so the interpreter gained an opt-in `APPLESOFT_TEST_KEYS` queue that feeds the same keyboard latch used by `PEEK(-16384)`. This made Enter, arrow-key steering, and quit behavior reproducible in automated runs.
+4. Use controlled routes to eat apples and expose logic defects: a shortened active-apple list, a stale erase that made a remaining apple invisible, and level progression that could never reach the last target.
+5. Compare the program with AppleWin and correct real Applesoft compatibility issues: `LE TO` tokenized as `LET O`, the interpreter-only `SOUND` statement was replaced with an embedded `$0300` `CALL 768` routine, and HUD rows were cleared with `CALL -868` before printing.
 
-- It demonstrates that the interpreter is not only a runtime, but also a reliable AI feedback harness for iterative BASIC game development.
-- It shows how visual output validation (autosnaps) can replace emulator round-tripping for many development tasks.
-- It provides a practical pattern you can reuse for your own generated or hand-written `.bas` programs.
+The important success is not that the first output was correct. It is that the interpreter became a practical feedback harness: the agent could render the game, send controlled input, inspect the result, discover when assumptions were wrong, and repair the BASIC program until the mechanics worked. Future work could make Snake faster and more polished, but this example demonstrates a complete, testable Apple II game-development loop rather than a static visual demo.
+
+Run it manually:
+
+```bash
+python run_basic_file.py examples/snake.bas
+```
 
 ---
 
 ## Sound Emulation and Music
 
 ### Overview
-This interpreter provides robust emulation of Apple II sound routines, supporting both the modern `SOUND` command and the classic machine language routine at address 768 (`CALL 768`).
+This interpreter supports an interpreter-only `SOUND` convenience command and the hardware-compatible machine-language routine at address 768 (`CALL 768`).
 
 #### Supported Methods
-- **SOUND freq, duration**: Directly plays a tone at the given frequency (Hz) for the specified duration (ms). Example: `SOUND 440, 500`.
-- **CALL 768**: Emulates the Apple II ML sound routine from Billy Sanders & Sam Edge’s *Kids to Kids on the Apple Computer* (Datamost, 1984). This routine is loaded by `init_sound.bas` and used by programs like `play_charge.bas` to play songs via `POKE 0, TONE: POKE 1, DURATION: CALL 768`.
+- **SOUND freq, duration**: Interpreter extension for quick desktop-only playback. It is not an Applesoft BASIC statement and must not be used in programs intended for real Apple II hardware or AppleWin.
+- **CALL 768**: Hardware-compatible ML sound routine from Billy Sanders & Sam Edge’s *Kids to Kids on the Apple Computer* (Datamost, 1984). It reads `POKE 0, TONE` and `POKE 1, DURATION` before `CALL 768`.
 
 - The ML routine in `init_sound.bas` is a direct transcription from the Sanders & Edge book, widely used in educational Apple II programs.
-- On a real Apple II, you would first run `init_sound.bas` to load the ML routine into memory, then run a program like `play_charge.bas` to play a song using `CALL 768`.
-- In this interpreter, the ML routine is emulated natively—no need to run `init_sound.bas` first.
+- On a real Apple II, run `init_sound.bas` before a program using `CALL 768`, or embed the loader `DATA` directly in the program as [basic_code/examples/snake.bas](basic_code/examples/snake.bas) does.
+- In this interpreter, `CALL 768` is emulated natively; embedding the loader remains safe and preserves real-hardware compatibility.
 
 #### Implementation Details
 - Sound is generated using Python and pygame (cross-platform). On Windows, winsound is used for short tones if pygame is unavailable.
@@ -96,13 +96,12 @@ POKE 0,63: POKE 1,40: CALL 768
 POKE 0,111: POKE 1,40: CALL 768
 POKE 0,141: POKE 1,40: CALL 768
 
-REM Play a note using SOUND
-SOUND 440, 500
+REM SOUND 440, 500 is interpreter-only; do not use it for Apple II programs.
 ```
 
 #### Notes
 - The Mary Had a Little Lamb arrangement in `play_song.bas` has been improved by the user for better musicality.
-- All sound routines work identically in the interpreter and on real Apple II hardware/emulators (with ML routine loaded).
+- Programs that use `CALL 768` with the ML routine loaded work on the interpreter, real Apple II hardware, and AppleWin. Programs using `SOUND` are interpreter-only.
 
 
 - **Complete Applesoft BASIC implementation** - All major commands and functions (100% compliance with Apple II Programmer's Reference)

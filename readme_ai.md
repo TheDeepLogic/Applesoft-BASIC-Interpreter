@@ -51,20 +51,29 @@ Helper script: `run_all_bas_tests.py`
 
 These are the kinds of reminders that belong in the AI-focused guide instead of the public README.
 
-### TEMPLATE_GAME Pattern (Current Repo Example)
-Use `basic_code/examples/TEMPLATE_GAME.bas` as the canonical AI iteration example for game-like GR workflows.
+### Snake Pattern: A Real AI Game Experiment
+`basic_code/examples/snake.bas` is the canonical game-development example. The earlier `TEMPLATE_GAME` experiment was a useful but unsuccessful first pass: it drew effects, but did not become a playable game and was removed. Do not use it as a baseline.
 
-- Build in small increments: title, map, player, collision, effects.
-- Run after each meaningful change:
-  ```bash
-  python applesoft.py basic_code/examples/TEMPLATE_GAME.bas --auto-close --autosnap-every 120 --blit-per-line --input-timeout 5 --exec-timeout 120
-  ```
-- Validate from rendered output, not assumptions.
-- Keep Applesoft constraints in mind:
-  - avoid ambiguous long variable names
-  - keep all line numbers unique
-  - prefer straightforward control flow over clever branching when debugging movement/collision
-- For collision-driven effects, confirm both trigger condition and visual duration (animation loops vs static waits).
+Snake works because the task was anchored in a known ruleset, then tested as a program rather than judged from source alone. Its development exposed several failure modes an agent must actively test for:
+
+- Duplicate line numbers silently replace earlier statements.
+- Applesoft recognizes only two significant variable-name characters. Avoid token-adjacent names such as `LE TO`, which real Applesoft can render as `LET O`.
+- Read a collision pixel before drawing over it.
+- After compacting an array, never erase through the old index; save the removed element's coordinates first.
+- `SOUND` is an interpreter extension, not Applesoft. Hardware-targeted programs must use the `$0300` loader plus `POKE 0,tone: POKE 1,duration: CALL 768`.
+- Clear GR text rows with `CALL -868` before redrawing a HUD line on real hardware.
+
+Use a two-part test loop:
+
+```bash
+# Render and inspect state changes.
+python applesoft.py basic_code/examples/snake.bas --auto-close --autosnap-every 180 --blit-per-line --exec-timeout 20
+
+# Supply deterministic Apple II key codes: Enter, Right, Down, then Q.
+APPLESOFT_TEST_KEYS=13,21,10,81 python applesoft.py basic_code/examples/snake.bas --auto-close --exec-timeout 20
+```
+
+On Windows PowerShell, set the environment value as `$env:APPLESOFT_TEST_KEYS='13,21,10,81'` before running Python. This test-only queue drives the same `PEEK(-16384)` keyboard latch as real input; it exists because Windows key injection did not reliably reach the pygame window.
 
 ### Common Applesoft Failure Modes
 1. Variable names longer than two characters are silently truncated in Applesoft.
@@ -77,7 +86,7 @@ Use `basic_code/examples/TEMPLATE_GAME.bas` as the canonical AI iteration exampl
 - `tests/README_TESTING.md` for interpreter and program testing workflow.
 - `run_basic_file.py` for single-program manual runs.
 - `run_all_bas_tests.py` for batch validation across the repository.
-- `basic_code/examples/TEMPLATE_GAME.bas` as a starting point for new games.
+- `basic_code/examples/snake.bas` as a working game and compatibility reference.
 
 ### Practical AI Loop
 1. Generate or edit a BASIC program.
