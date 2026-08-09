@@ -51,6 +51,21 @@ Helper script: `run_all_bas_tests.py`
 
 These are the kinds of reminders that belong in the AI-focused guide instead of the public README.
 
+### TEMPLATE_GAME Pattern (Current Repo Example)
+Use `basic_code/examples/TEMPLATE_GAME.bas` as the canonical AI iteration example for game-like GR workflows.
+
+- Build in small increments: title, map, player, collision, effects.
+- Run after each meaningful change:
+  ```bash
+  python applesoft.py basic_code/examples/TEMPLATE_GAME.bas --auto-close --autosnap-every 120 --blit-per-line --input-timeout 5 --exec-timeout 120
+  ```
+- Validate from rendered output, not assumptions.
+- Keep Applesoft constraints in mind:
+  - avoid ambiguous long variable names
+  - keep all line numbers unique
+  - prefer straightforward control flow over clever branching when debugging movement/collision
+- For collision-driven effects, confirm both trigger condition and visual duration (animation loops vs static waits).
+
 ### Common Applesoft Failure Modes
 1. Variable names longer than two characters are silently truncated in Applesoft.
 2. Every line number must be unique; duplicates trigger syntax errors.

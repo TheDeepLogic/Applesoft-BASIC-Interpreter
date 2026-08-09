@@ -28,14 +28,39 @@ This project is a Python-based Applesoft BASIC interpreter and renderer built to
 6. [Complete Feature List](#complete-feature-list)
 7. [POKE/PEEK/CALL Reference](#pokepeek-call-reference)
 8. [Implementation Details](#implementation-details)
-9. [Recent Lemonade Parity Changes](#recent-lemonade-parity-changes)
-10. [Known Issues](#known-issues)
-11. [Session Summary](#session-summary)
-12. [Testing](#testing)
+9. [AI Workflow Example: TEMPLATE_GAME](#ai-workflow-example-template_game)
+10. [Recent Lemonade Parity Changes](#recent-lemonade-parity-changes)
+11. [Known Issues](#known-issues)
+12. [Session Summary](#session-summary)
+13. [Testing](#testing)
 
 ---
 
 This project is a programmable Applesoft BASIC testbed: it runs `.bas` programs, renders Apple II output, and provides a repeatable way to verify behavior without leaving the editor or depending on a separate vintage machine. It is especially useful for testing and debugging BASIC programs end to end, including an AI workflow where the model can write code, run it, inspect the result, fix issues, and iterate until the program behaves correctly. In practice, that gives the AI a closed loop for development and troubleshooting, while also making the interpreter handy for humans who want fast validation, screenshots, and regression testing.
+
+---
+
+## AI Workflow Example: TEMPLATE_GAME
+
+One concrete example of repository value is [basic_code/examples/TEMPLATE_GAME.bas](basic_code/examples/TEMPLATE_GAME.bas), which was evolved from a starter template into a playable GR-mode game loop with a title sequence, keyboard movement, yellow-dot collision, and tunnel warp animation.
+
+The workflow used by the AI agent was:
+
+1. Start from a basic scaffold in [basic_code/examples/TEMPLATE_GAME.bas](basic_code/examples/TEMPLATE_GAME.bas).
+2. Implement gameplay features incrementally (title card, maze rendering, player movement, collision, warp effects).
+3. Run the program repeatedly with deterministic tooling:
+   ```bash
+   python applesoft.py basic_code/examples/TEMPLATE_GAME.bas --auto-close --autosnap-every 120 --blit-per-line --input-timeout 5 --exec-timeout 120
+   ```
+4. Inspect generated screenshots and runtime output to confirm what actually rendered.
+5. Apply targeted fixes for Applesoft-specific pitfalls (for example, duplicate line numbers and variable-name constraints).
+6. Re-run until behavior matched intent.
+
+Why this matters for visitors:
+
+- It demonstrates that the interpreter is not only a runtime, but also a reliable AI feedback harness for iterative BASIC game development.
+- It shows how visual output validation (autosnaps) can replace emulator round-tripping for many development tasks.
+- It provides a practical pattern you can reuse for your own generated or hand-written `.bas` programs.
 
 ---
 
