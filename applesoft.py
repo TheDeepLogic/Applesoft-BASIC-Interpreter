@@ -85,7 +85,7 @@ class ApplesoftInterpreter:
     
     def __init__(self, input_timeout: float = 30.0, execution_timeout: float = None, keep_window_open: bool = True,
                  autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
-                 composite_blur: bool = False, statement_delay: float = 0.0015, auto_close: bool = False,
+                 composite_blur: bool = False, statement_delay: float = 0.003, auto_close: bool = False,
                  window_close_delay: Optional[float] = 3.0, scale: int = 2, gr_plot_delay_ms: int = 0, blit_per_line: bool = False,
                  for_delay: Optional[float] = None, cpu_hz: float = 1_023_000.0):
         """Initialize the interpreter
@@ -98,7 +98,9 @@ class ApplesoftInterpreter:
             autosnap_on_end: Save a screenshot when program ends (default: False)
             artifact_mode: Simulate Apple II NTSC artifact color rules (default: True)
             composite_blur: Apply composite horizontal blur effect (default: False)
-            statement_delay: Delay in seconds after each statement to simulate Apple II speed (default: 0.0015)
+            statement_delay: Emulated seconds charged for each executed BASIC statement
+                (default: 0.003).  This is converted to CPU cycles and paced
+                against cpu_hz rather than slept once per source line.
             window_close_delay: Seconds to keep the window open after program end when not auto-closing.
                 Use None to wait indefinitely for manual close; 0 for immediate close; default: 3 seconds.
             gr_plot_delay_ms: Extra delay in milliseconds after each low-res PLOT to make animations visible (default: 0)
@@ -112,7 +114,7 @@ class ApplesoftInterpreter:
         self.autosnap_on_end = autosnap_on_end
         self.artifact_mode = artifact_mode
         self.composite_blur = composite_blur
-        self.statement_delay = statement_delay
+        self.statement_delay = max(0.0, float(statement_delay))
         self.auto_close = auto_close
         self.window_close_delay = window_close_delay if window_close_delay is None else max(0.0, float(window_close_delay))
         self.scale = max(1, scale)  # Minimum scale of 1
@@ -120,16 +122,21 @@ class ApplesoftInterpreter:
         self.gr_plot_delay_ms = max(0, int(gr_plot_delay_ms))
         # Apple II CPU baseline and tight FOR/NEXT cycle model.
         self.cpu_hz = max(1.0, float(cpu_hz))
-        # Tight FOR/NEXT loops are heavily used as software delay lines in many
-        # classic listings. Use a globally reasonable baseline delay rather than
-        # title/game-specific tuning so timing improves across programs.
-        self.tight_for_next_cycles = 350.0
+        # The bundled benchmark documents 3,750 and 30,000 iteration delay
+        # loops as approximately 5 and 40 seconds respectively.  At the
+        # Apple II's 1.023 MHz clock, that is about 1,364 cycles per NEXT.
+        # Keep this as a core calibration value, not a program-specific delay.
+        self.tight_for_next_cycles = 1364.0
         # FOR/NEXT tight loop delay (user-tunable). If not provided, derive from CPU cycles.
         self.for_delay = (
             float(for_delay)
             if for_delay is not None
             else (self.tight_for_next_cycles / self.cpu_hz)
         )
+        self.statement_cycles = self.statement_delay * self.cpu_hz
+        self._emulated_cycles = 0.0
+        self._timing_start = None
+        self._timing_active = False
         # Optional batched display flips per BASIC line
         self.blit_per_line = bool(blit_per_line)
         self._dirty_display = False
@@ -148,6 +155,10 @@ class ApplesoftInterpreter:
         self.cursor_enabled = True
         self.cursor_active = False
         self.interactive_shell_mode = False
+        # Paddle/button emulation state (Apple II game controls)
+        self.paddle_values = [127.0, 127.0, 127.0, 127.0]
+        self.paddle_step_per_sec = 280.0
+        self._last_paddle_update = time.perf_counter()
         # Optional INPUT/GET tracing for manual-play diagnostics.
         self.debug_input = bool(os.environ.get('APPLESOFT_DEBUG_INPUT'))
         self.debug_input_file = os.environ.get('APPLESOFT_DEBUG_INPUT_FILE', 'input_debug.log')
@@ -176,12 +187,106 @@ class ApplesoftInterpreter:
         except Exception:
             pass
 
-    def _effective_tight_loop_iterations(self, iter_count: int) -> int:
-        """Compress very large tight-loop delays globally to avoid extreme stalls."""
-        if iter_count <= 5000:
-            return max(0, int(iter_count))
-        # Keep short/medium loops faithful; compress only large delay loops.
-        return int(5000 + ((iter_count - 5000) * 0.25))
+    def _record_key_for_peek(self, event):
+        """Map pygame KEYDOWN events into Apple II keyboard buffer codes."""
+        if event.key == pygame.K_LEFT:
+            self.last_key_code = 8 | 0x80  # Backspace (left arrow)
+        elif event.key == pygame.K_RIGHT:
+            self.last_key_code = 21 | 0x80  # CTRL-U (right arrow)
+        elif event.key == pygame.K_UP:
+            self.last_key_code = 11 | 0x80  # CTRL-K (up arrow)
+        elif event.key == pygame.K_DOWN:
+            self.last_key_code = 10 | 0x80  # CTRL-J (down arrow)
+        elif event.unicode and len(event.unicode) == 1:
+            ascii_code = ord(event.unicode.upper())
+            self.last_key_code = ascii_code | 0x80
+
+    def _consume_keyboard_strobe(self):
+        """Mark the latched Apple II keyboard character as consumed.
+
+        The ROM keyboard routines used by Applesoft INPUT and GET read the
+        keyboard strobe as part of accepting a character.  Code which later
+        polls $C000 must therefore not see the key that completed INPUT/GET
+        as a newly pending key.
+        """
+        self.last_key_code &= 0x7F
+
+    def _update_paddles_from_keyboard(self):
+        """Update emulated paddle analog values from held keyboard keys."""
+        if not (PYGAME_AVAILABLE and pygame.display.get_init()):
+            return
+        try:
+            pygame.event.pump()
+            keys = pygame.key.get_pressed()
+        except Exception:
+            return
+
+        now = time.perf_counter()
+        dt = max(0.0, min(0.05, now - float(self._last_paddle_update)))
+        self._last_paddle_update = now
+        step = float(self.paddle_step_per_sec) * dt
+
+        p0_delta = 0.0
+        if keys[pygame.K_KP4] or keys[pygame.K_LEFT]:
+            p0_delta -= step
+        if keys[pygame.K_KP6] or keys[pygame.K_RIGHT]:
+            p0_delta += step
+
+        p1_delta = 0.0
+        if keys[pygame.K_KP8] or keys[pygame.K_UP]:
+            p1_delta -= step
+        if keys[pygame.K_KP2] or keys[pygame.K_DOWN]:
+            p1_delta += step
+
+        self.paddle_values[0] = max(0.0, min(255.0, float(self.paddle_values[0]) + p0_delta))
+        self.paddle_values[1] = max(0.0, min(255.0, float(self.paddle_values[1]) + p1_delta))
+
+    def _read_button_softswitch(self, index: int) -> float:
+        """Read emulated Apple II push-button softswitch value (>127 when pressed)."""
+        if not (PYGAME_AVAILABLE and pygame.display.get_init()):
+            return 0.0
+        try:
+            pygame.event.pump()
+            keys = pygame.key.get_pressed()
+        except Exception:
+            return 0.0
+
+        if index == 0:
+            pressed = bool(keys[pygame.K_LALT])
+        elif index == 1:
+            pressed = bool(keys[pygame.K_RALT])
+        elif index == 2:
+            pressed = bool(keys[pygame.K_LCTRL])
+        else:
+            pressed = bool(keys[pygame.K_RCTRL])
+        return 255.0 if pressed else 0.0
+
+    def _start_timing_clock(self):
+        """Start a monotonic Apple II CPU clock for a RUN invocation."""
+        self._emulated_cycles = 0.0
+        self._timing_start = time.perf_counter()
+        self._timing_active = True
+
+    def _pace_cycles(self, cycles: float):
+        """Advance emulated CPU time and wait only when the host is ahead."""
+        if not self._timing_active or cycles <= 0:
+            return
+        self._emulated_cycles += float(cycles)
+        deadline = self._timing_start + (self._emulated_cycles / self.cpu_hz)
+        remaining = deadline - time.perf_counter()
+        if remaining > 0:
+            self._sleep_with_event_pump(remaining)
+
+    def _statement_cycle_cost(self, statement: str) -> float:
+        """Return the calibrated base Applesoft dispatch cost for one statement.
+
+        This intentionally operates on parsed BASIC statements, rather than
+        source lines, so colon-packed and line-split programs receive the same
+        timing for the same work.
+        """
+        if not statement.strip() or statement.lstrip().upper().startswith('REM'):
+            return 0.0
+        return self.statement_cycles
 
     def _cursor_visible(self) -> bool:
         """Blink phase for the on-screen text cursor."""
@@ -303,6 +408,8 @@ class ApplesoftInterpreter:
         
         # Keyboard polling state for PEEK(-16384)
         self.last_key_code = 0  # Last key pressed (ASCII + 128 when available)
+        self.paddle_values = [127.0, 127.0, 127.0, 127.0]
+        self._last_paddle_update = time.perf_counter()
         
         # User-defined functions (DEF FN)
         self.user_functions: Dict[str, tuple] = {}
@@ -319,6 +426,9 @@ class ApplesoftInterpreter:
 
     def _init_memory_defaults(self):
         """Initialize key memory locations to Apple II defaults."""
+        # Text page 1 defaults to "space" bytes (high-bit set ASCII space).
+        for addr in range(0x0400, 0x0800):
+            self.memory[addr] = 0xA0
         # Text window at $0020-$0023 (32-35): left, width, top, bottom
         self.memory[32] = 0
         self.memory[33] = 40
@@ -335,10 +445,66 @@ class ApplesoftInterpreter:
         # Cursor X/Y at 36-37
         self.memory[36] = 0
         self.memory[37] = 0
+        # Text line base pointer at 40-41 (BASL/BASH) for current cursor row.
+        # Keep default aligned with row 0.
+        base = self._text_row_base_address(0)
+        self.memory[40] = base & 0xFF
+        self.memory[41] = (base >> 8) & 0xFF
         # Text attributes at 50 (255=NORMAL)
         self.memory[50] = 255
         # SPEED at 241 (optional, leave 0)
         self.memory[241] = 0
+
+    def _text_row_base_address(self, row: int) -> int:
+        """Return Apple II text-page base address for a given text row (0-23)."""
+        r = max(0, min(self.TEXT_ROWS - 1, int(row)))
+        # Apple II text rows are interleaved in memory.
+        return 0x0400 + ((r & 0x07) * 0x80) + ((r >> 3) * 0x28)
+
+    def _text_address_to_cell(self, addr: int) -> Optional[Tuple[int, int]]:
+        """Map a text-page memory address to (col,row), or None if not visible."""
+        a = int(addr) & 0xFFFF
+        for row in range(self.TEXT_ROWS):
+            base = self._text_row_base_address(row)
+            if base <= a < (base + self.TEXT_COLS):
+                return (a - base, row)
+        return None
+
+    def _apple_text_byte_to_char(self, byte_val: int) -> str:
+        """Convert an Apple text-page byte to an approximate display character."""
+        b = int(byte_val) & 0xFF
+        code = b & 0x7F
+        # Common cursor marker used by classic listings.
+        if code == 96:
+            return '█'
+        if 0 <= code < 32:
+            code = code + 64
+        if 32 <= code <= 126:
+            return chr(code)
+        return ' '
+
+    def _render_text_cell_from_memory_addr(self, addr: int):
+        """Render one text cell from Apple text-page memory to the text surface."""
+        if not (PYGAME_AVAILABLE and self.text_surface and self.font):
+            return
+        cell = self._text_address_to_cell(addr)
+        if not cell:
+            return
+        col, row = cell
+        ch = self._apple_text_byte_to_char(self.memory[int(addr) & 0xFFFF])
+        x_pixel = col * 14
+        y_pixel = row * 16
+        pygame.draw.rect(self.text_surface, (0, 0, 0), pygame.Rect(x_pixel, y_pixel, 14, 16))
+        char_surface = self.font.render(ch, True, (255, 255, 255), (0, 0, 0))
+        self.text_surface.blit(char_surface, (x_pixel, y_pixel))
+
+    def _write_text_char_to_memory(self, col: int, row: int, ch: str):
+        """Store one displayed text character into Apple text-page memory."""
+        c = max(0, min(self.TEXT_COLS - 1, int(col)))
+        r = max(0, min(self.TEXT_ROWS - 1, int(row)))
+        addr = self._text_row_base_address(r) + c
+        code = ord(ch) & 0x7F
+        self.memory[addr] = 0x80 | code
 
     def _sleep_with_event_pump(self, duration_sec: float):
         """Sleep while pumping pygame events so the window remains responsive."""
@@ -442,6 +608,7 @@ class ApplesoftInterpreter:
         
         # Track execution start time for timeout
         start_time = time.time()
+        self._start_timing_clock()
             
         self.running = True
         self.data_pointer = 0
@@ -482,20 +649,7 @@ class ApplesoftInterpreter:
                             if event.key == pygame.K_c and (event.mod & pygame.KMOD_CTRL):
                                 # Apple II BREAK equivalent during active execution.
                                 raise KeyboardInterrupt
-                            # Update keyboard buffer for PEEK(-16384)
-                            # Map arrow keys and special keys to Apple II codes
-                            if event.key == pygame.K_LEFT:
-                                self.last_key_code = 8 | 0x80  # Backspace (left arrow)
-                            elif event.key == pygame.K_RIGHT:
-                                self.last_key_code = 21 | 0x80  # CTRL-U (right arrow)
-                            elif event.key == pygame.K_UP:
-                                self.last_key_code = 11 | 0x80  # CTRL-K (up arrow)
-                            elif event.key == pygame.K_DOWN:
-                                self.last_key_code = 10 | 0x80  # CTRL-J (down arrow)
-                            elif event.unicode and len(event.unicode) == 1:
-                                # Regular character - set high bit to indicate key is available
-                                ascii_code = ord(event.unicode.upper())
-                                self.last_key_code = ascii_code | 0x80  # Set bit 7
+                            self._record_key_for_peek(event)
                 
                 # Find current line
                 if self.pc not in self.program:
@@ -525,9 +679,6 @@ class ApplesoftInterpreter:
                     try:
                         self.execute_statement(statement, start_index=start_index)
                         self.last_executed_line = self.current_line
-                        # Add delay to simulate Apple II speed
-                        if self.statement_delay > 0:
-                            time.sleep(self.statement_delay)
                         # Auto-screenshot every N statements if enabled
                         self.statement_counter += 1
                         if self.autosnap_every and (self.statement_counter % int(self.autosnap_every) == 0):
@@ -586,6 +737,7 @@ class ApplesoftInterpreter:
                 self.update_display(force=True)
         finally:
             self.running = False
+            self._timing_active = False
             
         # Print execution time
         elapsed_time = time.time() - start_time
@@ -665,6 +817,7 @@ class ApplesoftInterpreter:
                 continue
             self.current_part_index = idx
             self.execute_single_statement(part, immediate)
+            self._pace_cycles(self._statement_cycle_cost(part))
             if self._skip_rest_of_line:
                 self._skip_rest_of_line = False
                 break
@@ -1212,12 +1365,13 @@ class ApplesoftInterpreter:
         """NEXT command - optimized to run tight loops in Python with real Apple II timing"""
         if not self.for_stack:
             raise ApplesoftError("Next without for")
-            
-        var = args.strip().upper() if args.strip() else None
-        
+
+        # Applesoft accepts a comma-separated list, such as NEXT J,I,W, to
+        # close several nested loops.  Each name must match the current
+        # innermost loop after the preceding loop has completed.
+        next_vars = [part.strip().upper() for part in args.split(',') if part.strip()] if args.strip() else [None]
         loop = self.for_stack[-1]
-        
-        if var and var != loop['var']:
+        if next_vars[0] and next_vars[0] != loop['var']:
             raise ApplesoftError("Next without for")
         
         # FAST PATH: If the loop body is just "NEXT" (tight loop with no statements between FOR and NEXT)
@@ -1262,7 +1416,7 @@ class ApplesoftInterpreter:
                 ):
                     is_tight_loop = True
         
-        if is_tight_loop:
+        if is_tight_loop and len(next_vars) == 1:
             # This is a tight loop - execute remaining iterations with Apple II timing
             loop_var = loop['var']
             end_val = loop['end']
@@ -1274,7 +1428,6 @@ class ApplesoftInterpreter:
             
             # Execute remaining iterations without walking every iteration in
             # Python. Tight delay loops in classic BASIC can be very large.
-            start_time = time.perf_counter()
             iter_count = 0
             cur_val = float(self.variables.get(loop_var, 0.0))
 
@@ -1293,34 +1446,43 @@ class ApplesoftInterpreter:
             self.variables[loop_var] = cur_val + (iter_count * step_val)
 
             if loop_delay > 0 and iter_count > 0:
-                effective_iter_count = self._effective_tight_loop_iterations(iter_count)
-                target_end = start_time + (effective_iter_count * loop_delay)
-                remaining = target_end - time.perf_counter()
-                if remaining > 0:
-                    self._sleep_with_event_pump(remaining)
+                # Tight-loop optimization skips Python dispatch, never Apple
+                # II time.  Charge every emulated iteration with no long-loop
+                # compression so delay loops retain their program semantics.
+                self._pace_cycles(iter_count * loop_delay * self.cpu_hz)
             
             self.for_stack.pop()
             # Continue to next statement after NEXT
             return
         
-        # Normal loop with body (statements between FOR and NEXT)
-        # Increment loop variable
-        self.variables[loop['var']] += loop['step']
-        
-        # Check if done
-        if loop['step'] > 0:
-            done = self.variables[loop['var']] > loop['end']
-        else:
-            done = self.variables[loop['var']] < loop['end']
-            
-        if done:
-            self.for_stack.pop()
-            # Continue to next statement after NEXT (don't jump)
-        else:
-            # Jump back to the statement after FOR to repeat loop body
-            self.pc = for_line
+        # Normal loop with body (statements between FOR and NEXT).  Process
+        # each listed variable from inner to outer.  If a loop continues, its
+        # body resumes immediately; later variables in the NEXT list are only
+        # reached after that loop has completed.
+        for requested_var in next_vars:
+            if not self.for_stack:
+                raise ApplesoftError("Next without for")
+
+            loop = self.for_stack[-1]
+            if requested_var and requested_var != loop['var']:
+                raise ApplesoftError("Next without for")
+
+            self.variables[loop['var']] += loop['step']
+            if loop['step'] > 0:
+                done = self.variables[loop['var']] > loop['end']
+            else:
+                done = self.variables[loop['var']] < loop['end']
+
+            if done:
+                self.for_stack.pop()
+                continue
+
+            # Jump back to the statement containing this FOR.  The executor
+            # will stop processing the current NEXT list at this point.
+            self.pc = loop['line']
             self.pending_statement_index = loop.get('resume_part', 0)
             self.pc_changed = True
+            return
             
     def cmd_input(self, args: str):
         """INPUT command"""
@@ -1355,6 +1517,9 @@ class ApplesoftInterpreter:
 
         self.cursor_active = True
         try:
+            # INPUT uses the ROM keyboard routine, which consumes any
+            # previously latched keyboard character before it waits.
+            self._consume_keyboard_strobe()
             input_str = self.get_input_with_timeout()
         finally:
             self.cursor_active = False
@@ -1362,6 +1527,10 @@ class ApplesoftInterpreter:
         
         if input_str is None:
             raise ApplesoftError(f"Input timeout after {self.input_timeout} seconds")
+
+        # The terminating RETURN and all characters accepted by INPUT have
+        # been consumed by the ROM input routine.
+        self._consume_keyboard_strobe()
 
         self._trace_input_event('INPUT', input_str)
         
@@ -1397,10 +1566,14 @@ class ApplesoftInterpreter:
         var = args.strip().upper()
         
         # Get single character with timeout
+        self._consume_keyboard_strobe()
         char = self.get_char_with_timeout()
         
         if char is None:
             raise ApplesoftError(f"Input timeout after {self.input_timeout} seconds")
+
+        # GET also obtains its character through the ROM keyboard routine.
+        self._consume_keyboard_strobe()
             
         if var.endswith('$'):
             self.variables[var] = char
@@ -1484,6 +1657,7 @@ class ApplesoftInterpreter:
                     self.running = False
                     return None
                 elif event.type == pygame.KEYDOWN:
+                    self._record_key_for_peek(event)
                     if event.key == pygame.K_c and (event.mod & pygame.KMOD_CTRL):
                         # Treat Ctrl+C as control character input, not interpreter break.
                         return ''.join(input_buffer) + chr(3)
@@ -1551,6 +1725,7 @@ class ApplesoftInterpreter:
                         self.running = False
                         return None
                     elif event.type == pygame.KEYDOWN:
+                        self._record_key_for_peek(event)
                         if event.key == pygame.K_c and (event.mod & pygame.KMOD_CTRL):
                             self._trace_input_event('GET', '\\x03')
                             return chr(3)
@@ -1664,6 +1839,23 @@ class ApplesoftInterpreter:
         if not PYGAME_AVAILABLE or not self.screen or not self.font:
             return
 
+        def sync_cursor_memory():
+            self.memory[36] = max(0, min(self.TEXT_COLS - 1, int(self.text_x)))
+            self.memory[37] = max(0, min(self.TEXT_ROWS - 1, int(self.text_y)))
+
+        def advance_line_from_wrap_or_newline(window_left: int, max_text_row: int):
+            self.text_y += 1
+            self.text_x = window_left if self.graphics_mode not in ['HGR', 'HGR2'] else 0
+            if self.text_y > max_text_row:
+                # Scroll up within text area
+                if self.graphics_mode == 'GR' and max_text_row <= 19:
+                    # Keep GR graphics-area cursor bounded; old listings often rely on
+                    # explicit VTAB/HTAB positioning rather than scrolling here.
+                    self.text_y = max_text_row
+                else:
+                    self.scroll_text_up()
+                    self.text_y = max_text_row
+
         def get_window_bounds():
             left = int(self.memory[32]) if 0 <= int(self.memory[32]) < self.TEXT_COLS else 0
             width = int(self.memory[33]) if int(self.memory[33]) > 0 else self.TEXT_COLS
@@ -1685,8 +1877,8 @@ class ApplesoftInterpreter:
 
         def render_gr_semigraphics_char(ch: str, x_col: int, y_row: int):
             # In Apple II GR mode, characters in the graphics area map to two 4-bit colors.
-            # Applesoft text is typically stored with bit 7 set, which is what classic
-            # listings like Lemonade Stand rely on for pink/green logo animation.
+            # Applesoft text is typically stored with bit 7 set, so its nibbles map
+            # directly to the two low-resolution colors in the cell.
             code = ord(ch) & 0x7F
             cell_byte = code | 0x80
             top_color = cell_byte & 0x0F
@@ -1718,36 +1910,28 @@ class ApplesoftInterpreter:
         
         # Handle special characters
         if char == '\n':
-            self.text_y += 1
-            self.text_x = window_left if self.graphics_mode not in ['HGR', 'HGR2'] else 0
-            if self.text_y > max_text_row:
-                # Scroll up within text area
-                if self.graphics_mode == 'GR' and max_text_row <= 19:
-                    # Keep GR graphics-area cursor bounded; old listings often rely on
-                    # explicit VTAB/HTAB positioning rather than scrolling here.
-                    self.text_y = max_text_row
-                else:
-                    self.scroll_text_up()
-                    self.text_y = max_text_row
+            advance_line_from_wrap_or_newline(window_left, max_text_row)
+            sync_cursor_memory()
         elif ord(char) < 32:
             # Control character - skip rendering (bell, tab, etc.)
             # Bell character (CHR$(7)) would play a sound in real Apple II
             if ord(char) == 7:
                 # Optional: play a beep sound
                 pass
+            sync_cursor_memory()
             return
         else:
             if self.graphics_mode == 'GR' and self.text_y <= 19:
                 render_gr_semigraphics_char(char, self.text_x, self.text_y)
                 self.text_x += 1
                 if self.text_x > window_right:
-                    self.text_x = window_left
-                    self.text_y += 1
-                    if self.text_y > max_text_row:
-                        self.text_y = max_text_row
+                    advance_line_from_wrap_or_newline(window_left, max_text_row)
+                sync_cursor_memory()
                 return
 
             # Render character at current position
+            cur_x = self.text_x
+            cur_y = self.text_y
             x_pixel = self.text_x * 14
             y_pixel = self.text_y * 16
             
@@ -1758,14 +1942,15 @@ class ApplesoftInterpreter:
                 char_surface = self.font.render(char, True, (255, 255, 255), (0, 0, 0))
             
             self.text_surface.blit(char_surface, (x_pixel, y_pixel))
+            self._write_text_char_to_memory(cur_x, cur_y, char)
             
+            # The Apple II monitor advances immediately after writing column
+            # 40.  A following carriage return therefore advances one more
+            # row, just as it does on the hardware.
             self.text_x += 1
             if self.text_x > window_right:
-                self.text_x = window_left if self.graphics_mode not in ['HGR', 'HGR2'] else 0
-                self.text_y += 1
-                if self.text_y > max_text_row:
-                    self.scroll_text_up()
-                    self.text_y = max_text_row
+                advance_line_from_wrap_or_newline(window_left, max_text_row)
+            sync_cursor_memory()
     
     def render_text_to_surface(self, text: str):
         """Render text string to the text surface"""
@@ -1791,6 +1976,8 @@ class ApplesoftInterpreter:
             # In TEXT mode, clear entire text surface
             if self.graphics_mode == 'TEXT':
                 self.text_surface.fill((0, 0, 0))
+                for addr in range(0x0400, 0x0800):
+                    self.memory[addr] = 0xA0
                 self.text_x = 0
                 self.text_y = 0
             else:
@@ -1931,6 +2118,39 @@ class ApplesoftInterpreter:
         self.gr_color = color % 16
         if PYGAME_AVAILABLE:
             self.update_display()
+
+    def _sync_text_cell_from_gr(self, x: int, y: int):
+        """Mirror a low-res cell write into TEXT page character rendering.
+
+        Apple II low-res graphics share memory with the text page. Some classic
+        programs draw with PLOT/HLIN/VLIN while in TEXT and expect characters to
+        appear from the underlying byte patterns (e.g., '*' borders).
+        """
+        if not (PYGAME_AVAILABLE and self.text_surface and self.font):
+            return
+        if self.graphics_mode != 'TEXT':
+            return
+        if not (0 <= x < self.GR_WIDTH and 0 <= y < self.GR_HEIGHT):
+            return
+
+        row = y // 2
+        if not (0 <= row < self.TEXT_ROWS):
+            return
+
+        # Low-res/text share memory on Apple II. Each lo-res write updates
+        # only one nibble of the destination byte (top or bottom half-cell),
+        # preserving the other nibble.
+        addr = self._text_row_base_address(row) + x
+        cur = int(self.memory[addr]) & 0xFF
+        nib = int(self.gr_color) & 0x0F
+        if (y % 2) == 0:
+            # Even y = top half-cell -> low nibble.
+            new_val = (cur & 0xF0) | nib
+        else:
+            # Odd y = bottom half-cell -> high nibble.
+            new_val = (cur & 0x0F) | (nib << 4)
+        self.memory[addr] = new_val
+        self._render_text_cell_from_memory_addr(addr)
         
     def cmd_plot(self, args: str):
         """PLOT command - plot a point in low-res graphics"""
@@ -1946,6 +2166,7 @@ class ApplesoftInterpreter:
         # Update buffer if in range
         if 0 <= x < self.GR_WIDTH and 0 <= y < self.GR_HEIGHT:
             self.gr_buffer[y][x] = self.gr_color % 16
+            self._sync_text_cell_from_gr(x, y)
         if PYGAME_AVAILABLE:
             self.update_display()
             # Optional small delay to make animations (like moving bullets) visible
@@ -1975,6 +2196,7 @@ class ApplesoftInterpreter:
             for x in range(min(x1, x2), max(x1, x2) + 1):
                 if 0 <= x < self.GR_WIDTH:
                     self.gr_buffer[y][x] = self.gr_color % 16
+                    self._sync_text_cell_from_gr(x, y)
         if PYGAME_AVAILABLE:
             self.update_display()
                 
@@ -1998,6 +2220,7 @@ class ApplesoftInterpreter:
             for y in range(min(y1, y2), max(y1, y2) + 1):
                 if 0 <= y < self.GR_HEIGHT:
                     self.gr_buffer[y][x] = self.gr_color % 16
+                    self._sync_text_cell_from_gr(x, y)
         if PYGAME_AVAILABLE:
             self.update_display()
 
@@ -2334,11 +2557,13 @@ class ApplesoftInterpreter:
         """HTAB command - set horizontal cursor position"""
         x = int(self.evaluate(args))
         self.text_x = x - 1  # BASIC uses 1-based
+        self.memory[36] = max(0, min(self.TEXT_COLS - 1, int(self.text_x)))
         
     def cmd_vtab(self, args: str):
         """VTAB command - set vertical cursor position"""
         y = int(self.evaluate(args))
         self.text_y = y - 1  # BASIC uses 1-based
+        self.memory[37] = max(0, min(self.TEXT_ROWS - 1, int(self.text_y)))
         
     def cmd_inverse(self, args: str):
         """INVERSE command - enable inverse video"""
@@ -2373,6 +2598,12 @@ class ApplesoftInterpreter:
         
         # Write to memory array
         self.memory[addr] = val
+
+        # Text page 1 memory writes should affect visible text contents.
+        # This is used by many classic listings for cursor markers and direct
+        # screen-byte effects.
+        if 0x0400 <= addr < 0x0800:
+            self._render_text_cell_from_memory_addr(addr)
         
         # Handle special address ranges with side effects
         
@@ -2569,10 +2800,22 @@ class ApplesoftInterpreter:
             return
         
         # CALL 768: Apple II sound routine
-        # Reads TONE from memory location 0 and DURATION from memory location 1.
+        # Several common routines are loaded at this entry point.  The
+        # original Applesoft example routine reads its parameters from $00/$01;
+        # the compact routine beginning "AD 30 C0" reads them from $06/$07.
+        # Detect the routine from its machine-code entry rather than from the
+        # calling BASIC program.
         if addr == 768:
-            tone_val = int(self.memory[0]) & 0xFF
-            duration_val = int(self.memory[1]) & 0xFF
+            compact_sound_routine = (
+                int(self.memory[768]) == 0xAD
+                and int(self.memory[769]) == 0x30
+                and int(self.memory[770]) == 0xC0
+                and int(self.memory[782]) == 0xA6
+                and int(self.memory[783]) == 0x06
+            )
+            parameter_base = 6 if compact_sound_routine else 0
+            tone_val = int(self.memory[parameter_base]) & 0xFF
+            duration_val = int(self.memory[parameter_base + 1]) & 0xFF
             _play_apple_tone(tone_val, duration_val)
             return
 
@@ -2901,17 +3144,7 @@ class ApplesoftInterpreter:
                         self.running = False
                         return
                     elif event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_LEFT:
-                            self.last_key_code = 8 | 0x80
-                        elif event.key == pygame.K_RIGHT:
-                            self.last_key_code = 21 | 0x80
-                        elif event.key == pygame.K_UP:
-                            self.last_key_code = 11 | 0x80
-                        elif event.key == pygame.K_DOWN:
-                            self.last_key_code = 10 | 0x80
-                        elif event.unicode and len(event.unicode) == 1:
-                            ascii_code = ord(event.unicode.upper())
-                            self.last_key_code = ascii_code | 0x80
+                        self._record_key_for_peek(event)
 
             # Read current byte via PEEK to honor softswitch behavior
             byte_val = int(self.evaluate(f"PEEK({addr})")) & 0xFF
@@ -3424,21 +3657,21 @@ class ApplesoftInterpreter:
             # Joystick button 0 ($C061 / -16287) - open apple key
             elif addr == 49249 or addr == ((-16287 + 65536) % 65536):
                 # Returns > 127 if pressed, <= 127 if not
-                return 0
+                return self._read_button_softswitch(0)
             
             # Joystick button 1 ($C062 / -16286) - solid apple key
             elif addr == 49250 or addr == ((-16286 + 65536) % 65536):
                 # Returns > 127 if pressed, <= 127 if not
-                return 0
+                return self._read_button_softswitch(1)
             
             # Joystick button 2 ($C063 / -16285)
             elif addr == 49251 or addr == ((-16285 + 65536) % 65536):
                 # Returns > 127 if pressed, <= 127 if not
-                return 0
+                return self._read_button_softswitch(2)
             
             # Joystick button 3 ($C064 / -16284) - no read available (always returns 0)
             elif addr == 49252 or addr == ((-16284 + 65536) % 65536):
-                return 0
+                return self._read_button_softswitch(3)
             
             # Cassette input ($C060 / -16288)
             elif addr == 49248 or addr == ((-16288 + 65536) % 65536):
@@ -3451,7 +3684,8 @@ class ApplesoftInterpreter:
             
             # Speaker ($C030 / -16336) - produces click
             elif addr == 49200 or addr == ((-16336 + 65536) % 65536):
-                # Speaker click (reading instead of POKE produces single click)
+            # $C030 toggles the speaker on either read or write.
+                self._speaker_click()
                 return 0
             
             # Cassette output ($C020 / -16352) - produces cassette click
@@ -3480,17 +3714,30 @@ class ApplesoftInterpreter:
                 # Return simple non-zero error code when an error is active
                 return float(getattr(self, 'last_error_code', 0) if self.last_error else 0)
             
-            # Update cursor position from memory if accessed
+            # Update cursor/screen pointer compatibility values
             if addr == 36:  # Cursor X
                 return float(self.text_x)
             elif addr == 37:  # Cursor Y
                 return float(self.text_y)
+            elif addr == 40:  # BASL (low byte of text-row base address)
+                base = self._text_row_base_address(self.text_y)
+                return float(base & 0xFF)
+            elif addr == 41:  # BASH (high byte of text-row base address)
+                base = self._text_row_base_address(self.text_y)
+                return float((base >> 8) & 0xFF)
             
             # Return value from memory array
             return float(self.memory[addr])
         elif func_name == 'PDL':
-            # Return 0 for paddle
-            return 0
+            # PDL(n) returns analog paddle value (0-255). Emulate via keyboard.
+            idx = 0
+            try:
+                idx = int(self.evaluate(args_str))
+            except Exception:
+                idx = 0
+            idx = max(0, min(3, idx))
+            self._update_paddles_from_keyboard()
+            return float(int(self.paddle_values[idx]))
         elif func_name == 'POS':
             return float(self.text_x)
         elif func_name == 'FRE':
@@ -3924,8 +4171,8 @@ def main():
     parser.add_argument('--composite-blur', dest='composite_blur', action='store_true',
                        help='Apply horizontal composite blur effect (ghostly afterglow)')
     parser.set_defaults(composite_blur=False)
-    parser.add_argument('--delay', type=float, default=0.0015,
-                       help='Statement execution delay in seconds to simulate Apple II speed (default: 0.0015)')
+    parser.add_argument('--delay', type=float, default=0.003,
+                       help='Emulated seconds charged per executed BASIC statement (default: 0.003)')
     parser.add_argument('--plot-delay-ms', type=int, default=0,
                        help='Extra delay in milliseconds after each low-res PLOT for visible animation (default: 0)')
     parser.add_argument('--auto-close', action='store_true',

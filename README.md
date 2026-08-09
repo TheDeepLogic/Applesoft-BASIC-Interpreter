@@ -12,7 +12,7 @@ This project is a Python-based Applesoft BASIC interpreter and renderer built to
 > 
 > With that in-mind, I've leveraged GitHub Copilot to create or enhance the code within this repository and, outside of this notice, all related documentation. While I'd love to tell you that I pore over it all and make revisions, that just isn't the case. To prevent my behavior from keeping these tools from seeing the light of day, I've decided to do as little of that as possible! My workflow involves simply stating the need to GitHub Copilot, providing reference material where helpful, running the resulting code, and, if there is an actionable output, validating that it's correct. If I find a change I'd like to make, I describe it to Copilot. I've been leveraging the Agent CLI and it takes care of the core debugging.
 >
-> With all that being said, please keep in-mind that what you read and execute was created by Claude Sonnet 4.5. There may be mistakes. If you find an error, please feel free to submit a pull request with a correction!
+> With all that being said, please keep in-mind that what you read and execute was created by Claude Sonnet 4.5 and Codex 5.6 Terra. There may be mistakes. If you find an error, please feel free to submit a pull request with a correction!
 >
 > Thanks: [Joshua Bell](https://www.calormen.com/jsbasic/) for writing [JSBASIC](https://github.com/inexorabletash/jsbasic/), which was almost enough for me to not consider this project. Unfortunately, I needed graphics capabilities locally and a way for the model to evaluate those so had to go this route. If you are looking for something that processes text based Applesoft programs from a command line, and don't want to fiddle with all this, that project is an excellent candidate. And, while I can't seem to find any information on the original author of these fonts, or any license information, I'd like to thank whoever created PrintChar21.ttf and PRNumber3.ttf. If anyone knows, please reach out to me and I'll include their information. These seem to have been available on the internet for quite a long while and are hosted by multiple sources. They were used in this and saved some implementation time.
 
@@ -166,12 +166,12 @@ python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS
 - `--autosnap-on-end`: Save a screenshot when the program ends
 - `--no-artifact`: Use artifact-free rendering (disables NTSC simulation)
 - `--composite-blur`: Apply horizontal blur for composite smoothing
-- `--delay`: Statement execution delay in seconds (default: 0.0015)
+- `--delay`: Emulated time charged per executed BASIC statement (default: 0.003 seconds). It is paced against the configured Apple II CPU clock.
 - `--plot-delay-ms`: Extra delay (ms) after each low-res `PLOT` for visible animation (default: 0)
 - `--blit-per-line`: Defer display composition/flip until the end of each BASIC line (closer to Apple II draw cadence)
 - `--scale`: Display scale factor (default: 2 for 1120x768 window)
 
-- `--for-delay`: Set the delay in seconds per iteration for tight FOR/NEXT loops (default: 0.00013). Use this to fine-tune timing for programs that use delay loops, e.g. `FOR I = 1 TO D: NEXT I`.
+- `--for-delay`: Set the emulated delay per iteration for tight FOR/NEXT loops (default: about 0.00133 seconds at 1.023 MHz). Use this to fine-tune timing for programs that use delay loops, e.g. `FOR I = 1 TO D: NEXT I`.
 
 ### Example Programs:
 
@@ -655,7 +655,7 @@ ApplesoftInterpreter
 
 ### Key Implementation Patterns
 
-1. **Tight Loop Optimization**: Adjacent FOR/NEXT statements with no intervening code execute in a single Python while loop with minimal overhead. The per-iteration delay is user-tunable via `--for-delay` (default: 0.00013 seconds) for Apple II speed matching.
+1. **CPU Pacing and Tight Loops**: Execution is paced against a 1.023 MHz emulated clock. Adjacent FOR/NEXT statements with no intervening code execute efficiently in Python while every emulated iteration still receives its calibrated CPU time. The per-iteration delay is user-tunable via `--for-delay` (default: about 0.00133 seconds).
 
 2. **Display Batching**: Optional `--blit-per-line` defers pygame flip until the end of each BASIC line; prompts and mode switches still force immediate updates for responsiveness.
 3. **GR Animation Delay**: Optional `--plot-delay-ms` adds a small delay after each low-res `PLOT` to make movement (bullets, sprites) visibly closer to the Apple II cadence.
