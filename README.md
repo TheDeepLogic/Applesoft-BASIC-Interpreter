@@ -67,41 +67,29 @@ python run_basic_file.py examples/snake.bas
 ## Sound Emulation and Music
 
 ### Overview
-This interpreter supports an interpreter-only `SOUND` convenience command and the hardware-compatible machine-language routine at address 768 (`CALL 768`).
+This project separates convenience audio from hardware-oriented audio. The native baseline is a self-contained `$0300` machine-language speaker routine that runs through `CALL 768` on real hardware, AppleWin, and this interpreter.
 
 #### Supported Methods
-- **SOUND freq, duration**: Interpreter extension for quick desktop-only playback. It is not an Applesoft BASIC statement and must not be used in programs intended for real Apple II hardware or AppleWin.
-- **CALL 768**: Hardware-compatible ML sound routine from Billy Sanders & Sam Edge’s *Kids to Kids on the Apple Computer* (Datamost, 1984). It reads `POKE 0, TONE` and `POKE 1, DURATION` before `CALL 768`.
-
-- The ML routine in `init_sound.bas` is a direct transcription from the Sanders & Edge book, widely used in educational Apple II programs.
-- On a real Apple II, run `init_sound.bas` before a program using `CALL 768`, or embed the loader `DATA` directly in the program as [basic_code/examples/snake.bas](basic_code/examples/snake.bas) does.
-- In this interpreter, `CALL 768` is emulated natively; embedding the loader remains safe and preserves real-hardware compatibility.
+- **Native baseline**: [basic_code/audio/init_sound.bas](basic_code/audio/init_sound.bas) loads a 16-byte routine at `$0300`. `POKE 0` supplies its delay count and `POKE 1` supplies its speaker-toggle count, followed by `CALL 768`. The native demos load it themselves, so they do not depend on a prior program.
+- **SOUND freq, duration**: Interpreter extension for quick desktop-only playback. It is not Applesoft BASIC and must not be used for Apple II or AppleWin parity tests.
+- **Legacy CALL 768**: [basic_code/audio/init_sound_legacy_call768.bas](basic_code/audio/init_sound_legacy_call768.bas) and `*_legacy_call768.bas` preserve the earlier routine as a compatibility fixture. Its register-dependent timing cannot be reconstructed exactly from BASIC, so it is not the parity baseline.
 
 #### Implementation Details
 - Sound is generated using Python and pygame (cross-platform). On Windows, winsound is used for short tones if pygame is unavailable.
-- The interpreter uses exponential interpolation to match Apple II pitch tables for `CALL 768`, and direct frequency for `SOUND`.
-- All sound routines are documented and can be used in any BASIC program. See `basic_code/audio/init_sound.bas` and `basic_code/audio/play_charge.bas` for examples.
-
-#### Customization
-- You can adjust the base frequency of all sound output using the new command-line option:
-   ```bash
-   python applesoft.py program.bas --base-frequency MULTIPLIER
-   ```
-   For example, `--base-frequency 2.0` doubles all pitches (raises by one octave).
+- For the native `$0300` routine, the interpreter derives square-wave pitch and duration from the routine's 6502 cycle count and the configured `--cpu-hz` value. This makes the test signal track the same timing model as the rest of the emulator.
+- Use [basic_code/audio/audio_scale.bas](basic_code/audio/audio_scale.bas), [basic_code/audio/play_charge.bas](basic_code/audio/play_charge.bas), and [basic_code/audio/play_song.bas](basic_code/audio/play_song.bas) as native baseline tests.
 
 #### Example Usage
 ```basic
-REM Play a song using CALL 768
-POKE 0,63: POKE 1,40: CALL 768
-POKE 0,111: POKE 1,40: CALL 768
-POKE 0,141: POKE 1,40: CALL 768
+REM Load the 16-byte routine first, then play a native speaker tone.
+POKE 0,171: POKE 1,132: CALL 768
 
-REM SOUND 440, 500 is interpreter-only; do not use it for Apple II programs.
+REM SOUND 440,500 is interpreter-only; do not use it for Apple II programs.
 ```
 
 #### Notes
-- The Mary Had a Little Lamb arrangement in `play_song.bas` has been improved by the user for better musicality.
-- Programs that use `CALL 768` with the ML routine loaded work on the interpreter, real Apple II hardware, and AppleWin. Programs using `SOUND` are interpreter-only.
+- `*_interpreter_extension.bas` fixtures exercise the `SOUND` extension; they are intentionally not native tests.
+- The native routine produces a digital square wave with cycle-derived pitch and duration. Analog speaker and host-audio output remain physically different, so record/compare timing rather than expecting identical timbre.
 
 
 - **Complete Applesoft BASIC implementation** - All major commands and functions (100% compliance with Apple II Programmer's Reference)
@@ -178,11 +166,11 @@ Current prompt behavior intentionally tracks Apple II / AppleWin conventions clo
 ```bash
 python applesoft.py [filename] [--input-timeout SECONDS] [--exec-timeout SECONDS] \
                     [--auto-close] [--autosnap-every N] [--autosnap-on-end] \
-                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--plot-delay-ms MS] [--scale N] [--blit-per-line] [--for-delay SECONDS] [--base-frequency MULTIPLIER]
+                    [--no-artifact] [--composite-blur] [--delay SECONDS] [--plot-delay-ms MS] [--scale N] [--blit-per-line] [--for-delay SECONDS] [--cpu-hz HZ]
 ```
 
 **Options:**
-   - `--base-frequency`: Multiply all sound frequencies by this value (default: 1.0). Use to raise/lower pitch globally (e.g., 2.0 = one octave up).
+   - `--cpu-hz`: Set the emulated CPU clock used by timing and cycle-derived native speaker tones (default: `1023000`).
 - `--input-timeout`: Set input timeout in seconds (default: 30)
 - `--exec-timeout`: Stop execution after N seconds (optional)
 - `--auto-close`: Close pygame window and exit immediately when program ends

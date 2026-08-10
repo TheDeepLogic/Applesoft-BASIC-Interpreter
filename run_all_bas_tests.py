@@ -16,7 +16,8 @@ results = []
 
 SKIP_FILES = {
     "test_dos_color_test.bas",
-    "songs_demo.bas"
+    "songs_demo.bas",
+    "songs_demo_interpreter_extension.bas"
 }
 
 def should_skip(path: pathlib.Path) -> bool:

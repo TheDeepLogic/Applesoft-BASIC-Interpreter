@@ -85,7 +85,7 @@ class ApplesoftInterpreter:
     
     def __init__(self, input_timeout: float = 30.0, execution_timeout: float = None, keep_window_open: bool = True,
                  autosnap_every: Optional[int] = None, autosnap_on_end: bool = False, artifact_mode: bool = False,
-                 composite_blur: bool = False, statement_delay: float = 0.003, auto_close: bool = False,
+                 composite_blur: bool = False, statement_delay: float = 0.006, auto_close: bool = False,
                  window_close_delay: Optional[float] = 3.0, scale: int = 2, gr_plot_delay_ms: int = 0, blit_per_line: bool = False,
                  for_delay: Optional[float] = None, cpu_hz: float = 1_023_000.0):
         """Initialize the interpreter
@@ -99,7 +99,7 @@ class ApplesoftInterpreter:
             artifact_mode: Simulate Apple II NTSC artifact color rules (default: True)
             composite_blur: Apply composite horizontal blur effect (default: False)
             statement_delay: Emulated seconds charged for each executed BASIC statement
-                (default: 0.003).  This is converted to CPU cycles and paced
+                (default: 0.006).  This is converted to CPU cycles and paced
                 against cpu_hz rather than slept once per source line.
             window_close_delay: Seconds to keep the window open after program end when not auto-closing.
                 Use None to wait indefinitely for manual close; 0 for immediate close; default: 3 seconds.
@@ -148,8 +148,10 @@ class ApplesoftInterpreter:
         self._audio_failed = False
         self._click_sound = None
         self._tone_cache = {}
-        # Global CALL 768/770 tone duration scaling (ms per duration byte).
-        self.call_tone_ms_scale = 4.0
+        # Legacy CALL 768/770 tone duration scaling (ms per duration byte).
+        # The old routines do not provide enough register state to reproduce
+        # their timing exactly; native fixtures use the cycle-counted routine.
+        self.legacy_call_tone_ms_scale = 4.0
         # Text cursor behavior (Apple II-like blinking prompt cue).
         self.cursor_blink_period = 0.35
         self.cursor_enabled = True
@@ -290,6 +292,14 @@ class ApplesoftInterpreter:
         """
         if not statement.strip() or statement.lstrip().upper().startswith('REM'):
             return 0.0
+        normalized = re.sub(r'\s+', '', statement).upper()
+        # Native $0300 speaker programs set the delay and toggle registers
+        # immediately before CALL 768.  Charging each operation with the
+        # game-oriented generic delay creates audible holes between notes.
+        if normalized.startswith(('POKE0,', 'POKE1,')):
+            return 900.0
+        if normalized == 'CALL768' and self._is_native_speaker_routine():
+            return 900.0
         return self.statement_cycles
 
     def _cursor_visible(self) -> bool:
@@ -2762,6 +2772,14 @@ class ApplesoftInterpreter:
         
         # Other addresses are stored in memory but have no special effect in our interpreter
 
+    def _is_native_speaker_routine(self) -> bool:
+        """Return whether the bundled delay-loop speaker routine is at $0300."""
+        return (
+            [int(self.memory[768 + offset]) for offset in range(16)]
+            == [0xA4, 0x01, 0xA6, 0x00, 0xAD, 0x30, 0xC0, 0xEA,
+                0xEA, 0xCA, 0xD0, 0xFB, 0x88, 0xD0, 0xF3, 0x60]
+        )
+
     def cmd_call(self, args: str):
         """CALL command - handle Apple II monitor subroutines"""
         addr = int(self.evaluate(args.strip()))
@@ -2778,11 +2796,32 @@ class ApplesoftInterpreter:
             frequency = int(30000 / max(1, tone_val))
             frequency = max(60, min(4000, frequency))
 
-            # Global mapping from duration byte -> milliseconds.
-            # Keep short durations audible and longer durations bounded.
-            duration_ms = int(duration_val * self.call_tone_ms_scale)
+            # Legacy fallback for routines whose complete register state is
+            # not observable from BASIC. Native fixtures avoid this path.
+            duration_ms = int(duration_val * self.legacy_call_tone_ms_scale)
             duration_ms = max(8, min(450, duration_ms))
             self._play_tone(frequency, duration_ms)
+
+        def _play_native_speaker_tone(period_val: int, toggle_count: int):
+            """Synthesize the bundled $0300 routine from its 6502 cycle count.
+
+            The routine reloads X from $00, toggles $C030, then executes two
+            NOPs, DEX, and BNE until X reaches zero. $01 supplies the number
+            of speaker toggles. A non-final toggle takes 9*period + 11 CPU
+            cycles; the final branch is one cycle shorter. This derives both
+            pitch and duration from the configured Apple II CPU clock.
+            """
+            period_val = int(period_val) & 0xFF
+            toggle_count = int(toggle_count) & 0xFF
+            if period_val <= 0 or toggle_count <= 0:
+                return
+            half_period_cycles = (9 * period_val) + 11
+            total_cycles = (toggle_count * half_period_cycles) + 8
+            frequency = self.cpu_hz / (2.0 * half_period_cycles)
+            duration_ms = (total_cycles / self.cpu_hz) * 1000.0
+            # The physical speaker rings briefly after its final transition.
+            # Keep that decay asynchronous so adjacent BASIC notes overlap.
+            self._play_tone(frequency, duration_ms, waveform='speaker', release_ms=14.0)
 
         # Common monitor routines used by classic listings
         if addr == -958 or addr == ((-958 + 65536) % 65536):
@@ -2810,6 +2849,9 @@ class ApplesoftInterpreter:
         # Detect the routine from its machine-code entry rather than from the
         # calling BASIC program.
         if addr == 768:
+            if self._is_native_speaker_routine():
+                _play_native_speaker_tone(self.memory[0], self.memory[1])
+                return
             compact_sound_routine = (
                 int(self.memory[768]) == 0xAD
                 and int(self.memory[769]) == 0x30
@@ -2963,7 +3005,8 @@ class ApplesoftInterpreter:
 
         self._play_tone(freq, duration_ms, volume)
 
-    def _play_tone(self, freq_hz: float, duration_ms: float, volume: float = 0.5):
+    def _play_tone(self, freq_hz: float, duration_ms: float, volume: float = 0.5,
+                    waveform: str = 'sine', release_ms: float = 0.0):
         """Generate a tone via winsound (Windows) or pygame mixer; falls back to clicks."""
         if duration_ms <= 0 or freq_hz <= 0:
             return
@@ -2991,17 +3034,25 @@ class ApplesoftInterpreter:
             # Weather/music routines may call CALL 770 hundreds of times with
             # repeated parameters. Reuse generated samples to avoid expensive
             # per-call PCM synthesis overhead.
-            key = (int(round(freq_hz)), int(round(duration_ms)), int(round(volume * 100)))
+            key = (int(round(freq_hz)), int(round(duration_ms)), int(round(volume * 100)), waveform,
+                   int(round(release_ms)))
             tone = self._tone_cache.get(key)
             if tone is None:
-                sample_rate = 22050
-                total_samples = int(sample_rate * duration_sec)
+                sample_rate = pygame.mixer.get_init()[0]
+                release_samples = int(sample_rate * max(0.0, release_ms) / 1000.0)
+                total_samples = int(sample_rate * duration_sec) + release_samples
                 import array, math as _math
                 amp = int(30000 * volume)
                 samples = array.array('h')
                 for n in range(total_samples):
-                    t = n / sample_rate
-                    val = int(amp * _math.sin(2 * _math.pi * freq_hz * t))
+                    if waveform in ('square', 'speaker'):
+                        phase = (n * freq_hz) / sample_rate
+                        val = amp if int(phase) % 2 == 0 else -amp
+                        if waveform == 'speaker' and release_samples and n >= total_samples - release_samples:
+                            val = int(val * (total_samples - n) / release_samples)
+                    else:
+                        t = n / sample_rate
+                        val = int(amp * _math.sin(2 * _math.pi * freq_hz * t))
                     samples.append(val)
                 snd_bytes = samples.tobytes()
                 tone = pygame.mixer.Sound(buffer=snd_bytes)
@@ -4179,8 +4230,8 @@ def main():
     parser.add_argument('--composite-blur', dest='composite_blur', action='store_true',
                        help='Apply horizontal composite blur effect (ghostly afterglow)')
     parser.set_defaults(composite_blur=False)
-    parser.add_argument('--delay', type=float, default=0.003,
-                       help='Emulated seconds charged per executed BASIC statement (default: 0.003)')
+    parser.add_argument('--delay', type=float, default=0.006,
+                       help='Emulated seconds charged per executed BASIC statement (default: 0.006)')
     parser.add_argument('--plot-delay-ms', type=int, default=0,
                        help='Extra delay in milliseconds after each low-res PLOT for visible animation (default: 0)')
     parser.add_argument('--auto-close', action='store_true',

@@ -60,7 +60,7 @@ Snake works because the task was anchored in a known ruleset, then tested as a p
 - Applesoft recognizes only two significant variable-name characters. Avoid token-adjacent names such as `LE TO`, which real Applesoft can render as `LET O`.
 - Read a collision pixel before drawing over it.
 - After compacting an array, never erase through the old index; save the removed element's coordinates first.
-- `SOUND` is an interpreter extension, not Applesoft. Hardware-targeted programs must use the `$0300` loader plus `POKE 0,tone: POKE 1,duration: CALL 768`.
+- `SOUND` is an interpreter extension, not Applesoft. Hardware-targeted programs must load the native `$0300` routine, then use `POKE 0,delay: POKE 1,toggles: CALL 768`.
 - Clear GR text rows with `CALL -868` before redrawing a HUD line on real hardware.
 
 Use a two-part test loop:
@@ -251,69 +251,52 @@ Example:
 ## Sound Emulation and Music
 
 ### Overview
-This interpreter supports both modern and classic Apple II sound routines:
-- **SOUND freq, duration**: Direct frequency/duration playback (cross-platform via pygame).
-- **CALL 768**: Emulates the Apple II ML sound routine from Sanders & Edge’s *Kids to Kids on the Apple Computer* (Datamost, 1984), loaded by `init_sound.bas` and used by programs like `play_charge.bas`.
-
-- The ML routine in `init_sound.bas` is a direct transcription from the Sanders & Edge book, widely used in educational Apple II programs.
-- On real Apple II hardware, run `init_sound.bas` first to load the ML routine, then run a program (e.g., `play_charge.bas`) to play music using `CALL 768`.
-- In this interpreter, the ML routine is emulated natively—no need to run `init_sound.bas` first.
+This interpreter has three intentionally separate sound paths:
+- **Native `$0300` baseline**: `init_sound.bas` loads a deterministic 16-byte speaker routine. `POKE 0` controls delay count; `POKE 1` controls speaker toggles. The interpreter derives its square-wave pitch and duration from exact routine cycle counts at `--cpu-hz`.
+- **SOUND freq, duration**: Direct desktop playback extension. It is not valid Applesoft and is exercised only by `*_interpreter_extension.bas` fixtures.
+- **Legacy CALL 768**: `*_legacy_call768.bas` preserves the old register-dependent routine. The interpreter uses a best-effort approximation for it, so it is not a native timing reference.
 
 #### Implementation Details
 - Sound is generated using Python and pygame (cross-platform). On Windows, winsound is used for short tones if pygame is unavailable.
-- The interpreter uses exponential interpolation to match Apple II pitch tables for `CALL 768`, and direct frequency for `SOUND`.
-- All sound routines are documented and can be used in any BASIC program. See `basic_code/audio/init_sound.bas` and `basic_code/audio/play_charge.bas` for examples.
-
-#### Customization
-- Adjust the base frequency of all sound output using the command-line option:
-  ```bash
-  python applesoft.py program.bas --base-frequency MULTIPLIER
-  ```
-  For example, `--base-frequency 2.0` doubles all pitches (raises by one octave).
+- Native fixtures are self-contained and load the routine before using it. Use `audio_scale.bas` to check pitch order and `play_charge.bas` to check pitch sweep timing.
+- Audio waveform/timbre can differ between the physical Apple II speaker and the host mixer. Treat cycle counts, transition timing, and speaker-toggle count as the parity assertions.
 
 #### Example Usage
 ```basic
-REM Play a song using CALL 768
-POKE 0,63: POKE 1,40: CALL 768
-POKE 0,111: POKE 1,40: CALL 768
-POKE 0,141: POKE 1,40: CALL 768
-
-REM Play a note using SOUND
-SOUND 440, 500
+REM Native routine must already be loaded at $0300.
+POKE 0,171: POKE 1,132: CALL 768
 ```
 
 #### Notes
-- The Mary Had a Little Lamb arrangement in `play_song.bas` has been improved by the user for better musicality.
-- All sound routines work identically in the interpreter and on real Apple II hardware/emulators (with ML routine loaded).
+- Native routines are the hardware/AppleWin baseline. `SOUND` and legacy `CALL 768` fixtures remain useful only for their explicitly labeled compatibility paths.
 
 
-### SOUND Command
-Modern syntax for frequency/duration:
+### SOUND Command (Interpreter Extension)
+Desktop-only syntax:
 ```basic
 100 SOUND 440, 500      :REM Play 440 Hz for 500 ms
 110 SOUND 523, 250      :REM Play 523 Hz (C note) for 250 ms
 ```
 
-### Apple II Machine Language Sound Routine (CALL 768)
-Classic Apple II programs often use a machine language routine at address 768:
+### Native Apple II Speaker Routine (CALL 768)
+The native test routine at address 768 is self-loaded by the native audio fixtures:
 ```basic
-100 POKE 0, 100         :REM Tone value (1-255, lower = higher pitch)
-110 POKE 1, 50          :REM Duration (1-255, in timing loops)
+100 POKE 0, 171         :REM Delay count (1-255, higher = lower pitch)
+110 POKE 1, 132         :REM Speaker toggle count (1-255)
 120 CALL 768            :REM Play the tone
 ```
-- **Memory location 0**: Tone value (1-255). Lower values = higher frequencies.
-- **Memory location 1**: Duration value (1-255). Higher = longer duration.
-- **CALL 768**: Executes the sound routine using the POKE'd values.
-- The interpreter emulates this Apple II convention without requiring the init_sound.bas loader.
+- **Memory location 0**: Delay count (1-255). Higher values lower the pitch.
+- **Memory location 1**: Speaker-toggle count (1-255). Higher values lengthen the note.
+- **CALL 768**: Executes the loaded routine. Native programs must load it before calling.
 
 Example tune:
 ```basic
-10 POKE 0,63: POKE 1,40: CALL 768    :REM First note
-20 POKE 0,111: POKE 1,40: CALL 768   :REM Second note
-30 POKE 0,141: POKE 1,40: CALL 768   :REM Third note
+10 POKE 0,216: POKE 1,131: CALL 768  :REM C4
+20 POKE 0,171: POKE 1,165: CALL 768  :REM E4
+30 POKE 0,144: POKE 1,196: CALL 768  :REM G4
 ```
 
-Both methods produce audio on systems with sound support (Windows/pygame).
+Native fixtures should be the basis for parity testing. The interpreter-only extension is intentionally separate.
 
 ---
 
